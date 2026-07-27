@@ -12,7 +12,7 @@
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-MPS-000000?logo=apple&logoColor=white)](https://developer.apple.com/metal/pytorch/)
 [![Language](https://img.shields.io/badge/language-मराठी-138808)](#)
 [![Runs](https://img.shields.io/badge/runs-100%25%20offline-success)](#-privacy)
-[![License](https://img.shields.io/badge/license-Private-lightgrey)](#-license)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 > **Topics:** `marathi` · `tts` · `text-to-speech` · `voice-cloning` · `voice-fine-tuning` · `indicf5`
 > `f5-tts` · `ai4bharat` · `devanagari` · `audiobook` · `storytelling` · `horror-stories`
@@ -183,8 +183,11 @@ Fully offline at inference: the model, your scripts, your voice and the generate
 
 ## 📄 License
 
-Private. All rights reserved.
+Code in this repository is licensed under the [Apache License 2.0](LICENSE).
 
-The base model carries AI4Bharat's own licence, and a fine-tuned voice is
-personal, biometric-adjacent data — **do not distribute the weights**, and only
-clone a voice with that person's consent.
+Two things the licence does **not** cover:
+
+- **The base model** carries [AI4Bharat's own licence](https://huggingface.co/ai4bharat/IndicF5) — check it before any commercial use.
+- **The fine-tuned voice is not here, and is not covered.** A cloned voice is
+  personal, biometric-adjacent data. Do not distribute the weights, and only
+  ever fine-tune on a voice with that person's explicit consent.
