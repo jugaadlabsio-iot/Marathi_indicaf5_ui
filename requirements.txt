@@ -1,0 +1,16 @@
+# Install PyTorch FIRST, matched to your hardware:
+#
+#   NVIDIA (CUDA 12.1):
+#     pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+#   Apple Silicon / CPU:
+#     pip install torch torchaudio
+#
+# then:  pip install -r requirements.txt
+
+f5-tts>=1.1.0
+soundfile>=0.12
+soxr>=0.3
+numpy>=1.24
+gradio>=4.0
+cmudict>=1.0            # English -> Devanagari transliteration
+faster-whisper>=1.0     # optional: auto-transcribe reference clips

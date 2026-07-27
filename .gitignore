@@ -1,0 +1,47 @@
+# ---- trained model weights (NEVER commit - hundreds of MB to GB) ----
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+checkpoints/
+models/
+
+# ---- voice data & generated audio (personal, and easily regenerated) ----
+*.wav
+*.mp3
+*.m4a
+*.flac
+out/
+parts/
+wav_clean/
+queue/done/
+queue/failed/
+queue/*.txt
+!ref/*.txt          # keep reference TRANSCRIPTS, they are tiny and useful
+
+# ---- datasets ----
+*.zip
+marathi_voice_dataset*
+data/
+transcripts/
+
+# ---- python ----
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# ---- local scratch ----
+_t*.py
+*.log
