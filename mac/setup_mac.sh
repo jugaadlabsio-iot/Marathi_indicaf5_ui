@@ -1,12 +1,21 @@
 #!/bin/bash
 # Marathi Story Voice - setup for Apple Silicon (Mac mini M4)
-#   usage:  bash setup_mac.sh
+#
+#   from a git clone :  bash mac/setup_mac.sh
+#   from the zip     :  bash setup_mac.sh
 set -e
 
-HOME_DIR="$HOME/marathi_tts"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# works whether this script sits beside app.py (zip bundle) or in mac/ (git clone)
+if [ -f "$HERE/app.py" ]; then ROOT="$HERE"; else ROOT="$(cd "$HERE/.." && pwd)"; fi
+if [ ! -f "$ROOT/app.py" ]; then
+  echo "Cannot find app.py near $HERE - run this from inside the cloned repo."
+  exit 1
+fi
+HOME_DIR="$HOME/marathi_tts"
 
-echo "==> installing into $HOME_DIR"
+echo "==> source : $ROOT"
+echo "==> install: $HOME_DIR"
 mkdir -p "$HOME_DIR"/{models,ref,out}
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -28,9 +37,9 @@ echo
 echo "==> F5-TTS"
 if ! pip install f5-tts; then
   echo
-  echo "!! plain install failed - almost always 'bitsandbytes', which is a"
-  echo "!! TRAINING-only dependency with no Apple Silicon wheel. Installing"
-  echo "!! F5-TTS without deps and adding only what inference needs."
+  echo "!! plain install failed - almost always 'bitsandbytes', a TRAINING-only"
+  echo "!! dependency with no Apple Silicon wheel. Installing F5-TTS without"
+  echo "!! deps and adding only what inference needs."
   pip install f5-tts --no-deps
   pip install \
     transformers accelerate vocos x-transformers torchdiffeq ema-pytorch \
@@ -39,18 +48,19 @@ if ! pip install f5-tts; then
 fi
 
 echo
-echo "==> cmudict (English -> Devanagari transliteration)"
+echo "==> cmudict (English -> Devanagari) + faster-whisper (optional)"
 pip install cmudict
+pip install faster-whisper || echo "   faster-whisper skipped (auto-transcribe unavailable)"
 
 echo
 echo "==> copying app files"
-cp -v "$HERE/app.py" "$HOME_DIR/"
-cp -v "$HERE/translit.py" "$HOME_DIR/"
-cp -v "$HERE/start_ui.command" "$HOME_DIR/"
-[ -f "$HERE/pronunciation.json" ] && cp -v "$HERE/pronunciation.json" "$HOME_DIR/"
+for f in app.py translit.py run_queue.py pronunciation.json; do
+  [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
+done
+cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true
+chmod +x "$HOME_DIR/start_ui.command" 2>/dev/null || true
 mkdir -p "$HOME_DIR/ref"
-cp -v "$HERE"/ref/* "$HOME_DIR/ref/" 2>/dev/null || true
-chmod +x "$HOME_DIR/start_ui.command"
+cp -v "$ROOT"/ref/* "$HOME_DIR/ref/" 2>/dev/null || true
 
 echo
 echo "==> checking Apple Silicon acceleration"
@@ -61,23 +71,48 @@ ok = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
 print("MPS (GPU) available:", bool(ok), "->", "MPS" if ok else "CPU")
 PY
 
+# --- report what is still missing ------------------------------------------
+MODELS_OK=0; REF_OK=0
+ls "$HOME_DIR"/models/*.pt >/dev/null 2>&1 && MODELS_OK=1
+ls "$HOME_DIR"/ref/*.wav   >/dev/null 2>&1 && REF_OK=1
+
+echo
+echo "============================================================"
+echo " Setup complete."
+
+if [ "$MODELS_OK" -eq 0 ]; then
 cat <<'EOF'
 
-============================================================
- Setup done.
-
- STILL NEEDED - the model files, into ~/marathi_tts/models/ :
-     model_last.pt      (from the Kaggle notebook Output tab)
-     vocab.txt          (from the same run, base/vocab.txt)
+ STILL NEEDED - model files, into ~/marathi_tts/models/ :
+     model_last.pt     (Kaggle Output: ckpts/marathi_voice/model_last.pt)
+     vocab.txt         (Kaggle Output: base/vocab.txt)
 
  IMPORTANT: the browser saves the checkpoint as "model_last.zip".
- That file IS the .pt - a PyTorch checkpoint is a zip internally.
- Do NOT unzip it. Just rename it:
+ That file already IS the .pt - a PyTorch checkpoint is a zip internally.
+ Do NOT unzip it, just rename it:
 
      mv ~/Downloads/model_last.zip ~/marathi_tts/models/model_last.pt
+EOF
+fi
 
- Then start the app:
-     ~/marathi_tts/start_ui.command      (or double-click it in Finder)
+if [ "$REF_OK" -eq 0 ]; then
+cat <<'EOF'
+
+ STILL NEEDED - a reference clip, into ~/marathi_tts/ref/ :
+   Voice audio is deliberately NOT in the git repo. Either
+
+   (a) copy ref_short.wav AND ref_short.txt across from the PC, or
+   (b) record one in the app: "Reference clips" tab -> record 6-10 s of
+       calm narration, type the exact transcript, Save.
+
+   Always keep each .wav paired with a .txt of the exact words spoken.
+EOF
+fi
+
+cat <<'EOF'
+
+ Start it:
+     ~/marathi_tts/start_ui.command      (or double-click in Finder)
      open http://127.0.0.1:7860
 ============================================================
 EOF
