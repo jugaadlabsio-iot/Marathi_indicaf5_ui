@@ -27,6 +27,10 @@ try:
     import translit                      # English -> Devanagari (CMU based)
 except Exception:
     translit = None
+try:
+    import numerals                      # digits -> Marathi words
+except Exception:
+    numerals = None
 
 # ---------------------------------------------------------------- paths ----
 BASE = Path(os.environ.get("MTTS_HOME", Path(__file__).resolve().parent))
@@ -244,7 +248,23 @@ def strip_stage_directions(text):
     return "\n".join(out)
 
 
-def trim_silence(wav, sr, thresh_db=-40.0, keep_ms=40):
+def fade_edges(wav, sr, ms=8):
+    """Tiny fade in/out so joining chunks cannot click.
+
+    A hard cut between two waveforms is a step discontinuity - that is the
+    'abrupt start' and the clicks heard at pauses.
+    """
+    n = int(sr * ms / 1000)
+    if wav.size < 2 * n or n < 2:
+        return wav
+    ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    wav = wav.copy()
+    wav[:n] *= ramp
+    wav[-n:] *= ramp[::-1]
+    return wav
+
+
+def trim_silence(wav, sr, thresh_db=-55.0, keep_ms=120):
     """Trim leading/trailing silence ourselves.
 
     F5-TTS's own remove_silence needs ffmpeg via pydub, which is not installed
@@ -271,12 +291,14 @@ def trim_silence(wav, sr, thresh_db=-40.0, keep_ms=40):
     return wav[a:b]
 
 
-def prepare_text(text, d, use_dict, auto, drop_directions=True):
-    """Your dictionary wins; auto-transliteration mops up whatever is left."""
+def prepare_text(text, d, use_dict, auto, drop_directions=True, expand_nums=True):
+    """Your dictionary wins; then numbers; then leftover Latin words."""
     if drop_directions:
         text = strip_stage_directions(text)
     if use_dict:
-        text = apply_dict(text, d)
+        text = apply_dict(text, d)          # your overrides run first, always
+    if expand_nums and numerals is not None:
+        text = numerals.expand_numbers(text)
     if auto:
         text = auto_translit_text(text)
     return text
@@ -381,17 +403,45 @@ def estimate(script, max_chars, nfe, ref_wav):
 
 
 # ------------------------------------------------------------ generation ---
+def single_batch_limit(ref_wav, ref_text):
+    """Largest chunk F5-TTS will still render in ONE pass.
+
+    F5-TTS budgets roughly 22 s of audio per pass (reference + speech) and
+    silently splits anything longer, cross-fading the halves itself. Those
+    internal seams are where words get slurred and sentences sound broken.
+    Staying under this limit means every join is ours, with a real pause.
+    """
+    try:
+        dur = sf.info(ref_wav).duration
+    except Exception:
+        dur = 8.0
+    ref_bytes = len(ref_text.encode("utf-8"))
+    if dur <= 0 or ref_bytes == 0:
+        return 200
+    budget_bytes = ref_bytes / dur * max(1.0, 22.0 - dur)
+    # Devanagari averages ~3 bytes/char; keep 10% headroom
+    return max(80, int(budget_bytes / 3 * 0.9))
+
+
 def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                pauses, use_dict, dict_rows, auto_translit, device,
                out_name=None, on_progress=None, log=print,
-               cfg=2.0, sway=-1.0, trim=True, drop_directions=True):
+               cfg=2.0, sway=-1.0, trim=True, drop_directions=True,
+               expand_nums=True, one_pass=True):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
         raise RuntimeError(f"vocab.txt missing from {MODELS_DIR}")
 
     text = prepare_text(script, rows_to_dict(dict_rows), use_dict, auto_translit,
-                        drop_directions)
+                        drop_directions, expand_nums)
+
+    if one_pass:
+        cap = single_batch_limit(ref_wav, ref_txt)
+        if int(max_chars) > cap:
+            log(f"  chunk size {int(max_chars)} -> {cap} so every chunk renders "
+                f"in a single pass (avoids F5-TTS's internal seams)")
+            max_chars = cap
     items = split_blocks(text, int(max_chars))
     if not items:
         raise RuntimeError("Nothing to say.")
@@ -435,6 +485,13 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                                f"switch device to cpu.")
         if trim:
             wav = trim_silence(wav, sr)
+        wav = fade_edges(wav, sr)         # no clicks where chunks meet
+
+        # a chunk far shorter than its text implies the model truncated it
+        expected = len(chunk) / 16.0      # ~16 Devanagari chars per second
+        if expected > 2.0 and len(wav) / sr < expected * 0.55:
+            log(f"  chunk {i}: only {len(wav)/sr:.1f}s for {len(chunk)} chars "
+                f"- likely truncated, consider a smaller chunk size")
 
         sf.write(run_dir / f"{i:04d}.wav", wav, sr)   # never lose a long run
         pieces.append(wav)
@@ -458,6 +515,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
 def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              use_dict, dict_rows, auto_translit, device_choice,
              line_pause, para_pause, title, cfg, trim, drop_dir,
+             expand_nums, one_pass,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -477,7 +535,8 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars, pauses,
             use_dict, dict_rows, auto_translit, device, out_name=title,
             on_progress=lambda f, d: progress(f, desc=d),
-            cfg=cfg, trim=trim, drop_directions=drop_dir)
+            cfg=cfg, trim=trim, drop_directions=drop_dir,
+            expand_nums=expand_nums, one_pass=one_pass)
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -529,7 +588,7 @@ def clear_queue():
 def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, cfg=2.0, trim=True, drop_dir=True,
-              progress=gr.Progress()):
+              expand_nums=True, one_pass=True, progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
     jobs = list_queue()
@@ -558,7 +617,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                 on_progress=lambda f, d, _j=j: progress(
                     ((_j - 1) + f) / len(jobs), desc=f"{title}: {d}"),
                 log=lambda m: log_lines.append("   " + m),
-                cfg=cfg, trim=trim, drop_directions=drop_dir)
+                cfg=cfg, trim=trim, drop_directions=drop_dir,
+                expand_nums=expand_nums, one_pass=one_pass)
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -653,7 +713,10 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                         value="normal narration (1.00)", label="Delivery preset")
                     speed = gr.Slider(0.5, 1.5, 1.0, step=0.05, label="Speed")
                     nfe = gr.Slider(8, 64, 16, step=2,
-                                    label="NFE steps (16 draft · 32 production · 64 premium)")
+                                    label="NFE steps (16 draft · 32 final)",
+                                    info="32 is the sweet spot. Above ~40 the solver "
+                                         "over-sharpens and adds the buzzy artifacts - "
+                                         "more steps is not more quality here.")
                     cfg = gr.Slider(1.0, 3.0, 2.0, step=0.1,
                                     label="CFG strength (1.5 loose · 2.0 balanced · "
                                           "2.5 tight · 3.0 can sound stiff)")
@@ -669,7 +732,17 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                     trim = gr.Checkbox(
                         True, label="Trim silence around each chunk",
                         info="Removes the model's ragged head/tail silence so the "
-                             "pause settings below are exact.")
+                             "pause settings below are exact. Gentle by design - "
+                             "quiet trailing consonants are preserved.")
+                    expand_nums = gr.Checkbox(
+                        True, label="Read numbers as Marathi words",
+                        info="३०४ → तीनशे चार · 1994 → एकोणीसशे चौऱ्याण्णव · "
+                             "2019 → दोन हजार एकोणीस · 09 → शून्य नऊ")
+                    one_pass = gr.Checkbox(
+                        True, label="Force single-pass chunks (recommended)",
+                        info="Caps chunk size so F5-TTS never splits a chunk "
+                             "internally. Its hidden cross-fades are what make "
+                             "sentences sound broken or words slurred.")
                 with gr.Accordion("Pauses", open=True):
                     gr.Markdown(
                         "Your **line breaks are respected**: press Enter for a "
@@ -807,7 +880,8 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
     go.click(generate,
              [script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
-              line_pause, para_pause, title, cfg, trim, drop_dir],
+              line_pause, para_pause, title, cfg, trim, drop_dir,
+              expand_nums, one_pass],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -816,7 +890,8 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
     q_run.click(run_queue,
                 [ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                  use_dict, dict_rows, auto_translit, device_choice,
-                 line_pause, para_pause, cfg, trim, drop_dir],
+                 line_pause, para_pause, cfg, trim, drop_dir,
+                 expand_nums, one_pass],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)
@@ -837,6 +912,6 @@ if __name__ == "__main__":
     print(f"models: {MODELS_DIR}\nrefs  : {REF_DIR}\nout   : {OUT_DIR}")
     demo.queue().launch(
         server_name="127.0.0.1", server_port=7860, inbrowser=True,
-        # outputs live on D: - gradio refuses paths outside cwd/temp unless allowed
+        # gradio refuses paths outside cwd/temp unless explicitly allowed
         allowed_paths=[str(OUT_DIR), str(REF_DIR), str(MODELS_DIR)],
     )

@@ -33,6 +33,10 @@ p.add_argument("--device", default="auto")
 p.add_argument("--cfg", type=float, default=2.0, help="CFG strength (2.0 balanced)")
 p.add_argument("--no-trim", action="store_true", help="keep the model's own head/tail silence")
 p.add_argument("--keep-directions", action="store_true", help="read [stage directions] aloud")
+p.add_argument("--keep-digits", action="store_true",
+               help="do NOT spell numbers out as Marathi words")
+p.add_argument("--allow-splits", action="store_true",
+               help="let F5-TTS split long chunks itself (its seams cause slurring)")
 a = p.parse_args()
 
 ckpts = app.list_ckpts()
@@ -84,7 +88,9 @@ for i, name in enumerate(jobs, 1):
             on_progress=lambda f, msg: print(f"    {msg}", end="\r", flush=True),
             log=lambda m: print(m, flush=True),
             cfg=a.cfg, trim=not a.no_trim,
-            drop_directions=not a.keep_directions)
+            drop_directions=not a.keep_directions,
+            expand_nums=not a.keep_digits,
+            one_pass=not a.allow_splits)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1

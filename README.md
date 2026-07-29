@@ -43,7 +43,9 @@ Built for a specific job: producing long-form Marathi horror-story narration (�
 - **Automatic English → Devanagari** — driven by the CMU pronouncing dictionary (126k words), so it follows how a word is *said*, not how it is spelled: `buyer → बायर`, `Scientific → सायंटिफिक`, `IT → आय टी`.
 - **Pronunciation dictionary** — word-level overrides that always beat the automatic conversion. The practical handle for Marathi's dental vs palatal च/ज.
 - **Stage directions skipped** — `[वातावरणनिर्मिती ...]` and `*[सूचना: ...]*` cues are stripped, not narrated.
-- **Layout-driven pacing** — your line breaks and blank lines become real pauses.
+- **Numbers read as Marathi words** — `३०४ → तीनशे चार`, `1994 → एकोणीसशे चौऱ्याण्णव`, `2019 → दोन हजार एकोणीस`, `MH 09 BT → एम एच शून्य नऊ बी टी`, `११:४५ → अकरा पंचेचाळीस`. Digits are barely present in the training data, so left alone they come out wrong or get skipped.
+- **Single-pass chunking** — chunk size is capped to what F5-TTS can render in one forward pass, so it never splits and cross-fades behind your back. This is the fix for broken sentences and slurred words.
+- **Layout-driven pacing** — your line breaks and blank lines become real pauses, each join fade-matched so it cannot click.
 - **Reference clip manager** — record or upload clips per mood (calm, tense, dialogue) with their transcripts; switching clips is the main control over delivery.
 - **Crash-resilient** — every chunk is written to disk as it finishes, so a long run can never lose all its work.
 - **Delivery presets** — whisper 0.80 → chase 1.15, plus NFE and CFG controls.
@@ -110,11 +112,27 @@ python tools/slim_ckpt.py model_last.pt model_last_slim.pt   # 5.02 GB -> 2.51 G
 | Setting | Range | Notes |
 |---|---|---|
 | **Speed** | 0.80 – 1.15 | 0.80 whisper · 0.85 atmospheric · 1.00 narration · 1.10 tense · 1.15 chase |
-| **NFE steps** | 8 – 64 | 16 draft · 32 production · 64 premium |
+| **NFE steps** | 8 – 64 | 16 draft · **32 final**. Past ~40 the solver over-sharpens and adds buzzy artifacts — more steps is *not* more quality here |
 | **CFG strength** | 1.0 – 3.0 | 1.5 loose · **2.0 balanced** · 2.5 tight voice match · 3.0 can sound stiff |
-| **Chunk size** | 150 – 700 chars | Bigger = fewer passes = faster, but more VRAM |
+| **Chunk size** | 150 – 700 chars | Auto-capped when *single-pass chunks* is on — see below |
 | **Pauses** | ms | Within-line 150 · line break 350 · paragraph 800 |
+| **Read numbers as words** | on | ३०४ → तीनशे चार · 1994 → एकोणीसशे चौऱ्याण्णव · 09 → शून्य नऊ · ११:४५ → अकरा पंचेचाळीस |
+| **Single-pass chunks** | on | See below |
 | `sway_sampling_coef` | −1 | Fixed |
+
+### Single-pass chunks — the fix for broken sentences
+
+F5-TTS budgets roughly **22 seconds of audio per forward pass**, reference clip
+included. Hand it more text than that and it silently splits the chunk and
+cross-fades the halves itself — and those hidden seams are where words slur,
+sentences sound cobbled together, and "studio quality" starts buzzing. The log
+gives it away: `Generating audio in 2 batches`.
+
+With this on, the chunk size is derived from your reference clip
+(`(22 s − clip length) × its own chars-per-second`, minus 10 % headroom), so
+every chunk renders in exactly one pass and **every join is one we control**,
+with a real pause and an 8 ms fade. A 6-second clip yields ~160 characters; a
+9-second clip only ~118 — one more reason to keep reference clips short.
 
 **Punctuation still does its work** — `.` short pause · `,` tiny · `...` dramatic · `—` beat · `!` energy · `?` rising tone. A space inside a compound word can fix its pronunciation.
 
