@@ -54,7 +54,7 @@ pip install faster-whisper || echo "   faster-whisper skipped (auto-transcribe u
 
 echo
 echo "==> copying app files"
-for f in app.py translit.py run_queue.py pronunciation.json; do
+for f in app.py translit.py numerals.py run_queue.py pronunciation.json; do
   [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true

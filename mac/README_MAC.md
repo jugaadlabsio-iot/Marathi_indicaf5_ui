@@ -55,15 +55,49 @@ macOS may block it the first time ("unidentified developer") —
 
 ---
 
+## 4. Updating later
+
+Quit the app first (Ctrl-C in its Terminal window, or just close it), then:
+
+```bash
+cd ~/Marathi_indicaf5_ui && bash mac/update_mac.sh
+```
+
+That pulls the latest code and copies it into `~/marathi_tts`. It **does not
+touch** `models/`, `ref/`, `out/`, `queue/`, `venv/`, or your
+`pronunciation.json` — your voice, your clips, your overrides and your rendered
+audio all stay exactly as they are.
+
+If you want a specific release rather than the tip:
+
+```bash
+cd ~/Marathi_indicaf5_ui && git fetch --tags && git checkout v1.1.0 && bash mac/update_mac.sh
+```
+
+To go back to the tip afterwards: `git checkout main`.
+
+Releases are listed in [CHANGELOG.md](../CHANGELOG.md). If an update ever sounds
+worse than what you had, `git checkout v1.0.0 && bash mac/update_mac.sh` puts the
+previous version back — the model is untouched, so the comparison is fair.
+
+> If you cloned to a different folder, use that path instead of
+> `~/Marathi_indicaf5_ui`. `git remote -v` inside a folder confirms you're in
+> the right one.
+
+---
+
 ## What's included here
 
 ```
 app.py                the web UI
 translit.py           English -> Devanagari transliteration
+numerals.py           numbers -> Marathi words (304 -> तीनशे चार)
+run_queue.py          headless overnight batch runner
 setup_mac.sh          installer
+update_mac.sh         updater for an existing install
 start_ui.command      double-click launcher
 pronunciation.json    your saved pronunciation overrides (if any)
-ref/                  reference clips + their transcripts
+ref/                  reference clip transcripts (the .wav files are not in git)
 ```
 
 Reference clips shipped:
