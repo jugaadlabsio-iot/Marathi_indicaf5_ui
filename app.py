@@ -12,6 +12,7 @@ import os
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import json
+import random
 import re
 import shutil
 import time
@@ -31,6 +32,10 @@ try:
     import numerals                      # digits -> Marathi words
 except Exception:
     numerals = None
+try:
+    import pacing                        # how long should this text take to say
+except Exception:
+    pacing = None
 
 # ---------------------------------------------------------------- paths ----
 BASE = Path(os.environ.get("MTTS_HOME", Path(__file__).resolve().parent))
@@ -248,20 +253,28 @@ def strip_stage_directions(text):
     return "\n".join(out)
 
 
-def fade_edges(wav, sr, ms=8):
-    """Tiny fade in/out so joining chunks cannot click.
+def fade_edges(wav, sr, ms=6):
+    """Fade only INTO material that is already quiet.
 
     A hard cut between two waveforms is a step discontinuity - that is the
-    'abrupt start' and the clicks heard at pauses.
+    click at a pause. But an unconditional fade is worse than the click: where
+    a chunk begins on speech it eats the onset, which is a word getting
+    clipped. So where the edge is loud we pad a few ms of silence and fade
+    across the padding instead of across the speech.
     """
-    n = int(sr * ms / 1000)
-    if wav.size < 2 * n or n < 2:
+    n = max(2, int(sr * ms / 1000))
+    if wav.size < 4 * n:
         return wav
+    out = wav
+    if np.abs(out[:n]).max() > 0.02:
+        out = np.concatenate([np.zeros(n, np.float32), out])
+    if np.abs(out[-n:]).max() > 0.02:
+        out = np.concatenate([out, np.zeros(n, np.float32)])
     ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
-    wav = wav.copy()
-    wav[:n] *= ramp
-    wav[-n:] *= ramp[::-1]
-    return wav
+    out = out.copy()
+    out[:n] *= ramp
+    out[-n:] *= ramp[::-1]
+    return out
 
 
 def trim_silence(wav, sr, thresh_db=-55.0, keep_ms=120):
@@ -356,13 +369,45 @@ def split_text(text, max_chars=400):
     return chunks
 
 
-def split_blocks(text, max_chars=400):
+MIN_SENT_CHARS = 26        # below this a chunk is too short to synthesise well
+
+
+def split_sentences(line, max_chars, min_chars=MIN_SENT_CHARS):
+    """One item per sentence.
+
+    Packing several sentences into one chunk is what made the narration run
+    continuously: inside a chunk the model decides for itself how much to rest
+    at a full stop, and when it is short of time it decides 'not at all'. One
+    sentence per chunk means the gap between sentences is silence we insert,
+    not something we hope for.
+
+    Very short sentences are the opposite problem - F5-TTS is unstable on tiny
+    utterances (it force-slows anything under 10 bytes), so anything under
+    `min_chars` is glued to its neighbour rather than rendered alone.
+    """
+    sents = [s.strip() for s in _SENT.split(line) if s.strip()]
+    merged = []
+    for s in sents:
+        if merged and (len(merged[-1]) < min_chars or len(s) < min_chars) \
+                and len(merged[-1]) + len(s) + 1 <= max_chars:
+            merged[-1] = merged[-1] + " " + s
+        else:
+            merged.append(s)
+    out = []
+    for s in merged:
+        parts = split_text(s, max_chars) if len(s) > max_chars else [s]
+        for i, p in enumerate(parts):
+            out.append((p, "chunk" if i < len(parts) - 1 else "sent"))
+    return out
+
+
+def split_blocks(text, max_chars=400, per_sentence=True):
     """Split while RESPECTING your line breaks.
 
     Collapsing all whitespace destroyed exactly the pauses you wrote into the
     script, which is why lines ran together. Each returned item is
     (chunk_text, pause_kind) where pause_kind says how much silence follows:
-    'chunk' = mid-sentence-group, 'line' = you pressed Enter,
+    'chunk' = mid-sentence, 'sent' = a full stop, 'line' = you pressed Enter,
     'para'  = you left a blank line.
     """
     items = []
@@ -372,9 +417,13 @@ def split_blocks(text, max_chars=400):
             if items:
                 items[-1][1] = "para"
             continue
-        parts = split_text(s, max_chars)
-        for i, c in enumerate(parts):
-            items.append([c, "chunk" if i < len(parts) - 1 else "line"])
+        if per_sentence:
+            parts = split_sentences(s, max_chars)
+        else:
+            cs = split_text(s, max_chars)
+            parts = [(c, "chunk") for c in cs]
+        for i, (c, k) in enumerate(parts):
+            items.append([c, k if i < len(parts) - 1 else "line"])
     if items:
         items[-1][1] = "end"
     return [(c, k) for c, k in items]
@@ -423,11 +472,59 @@ def single_batch_limit(ref_wav, ref_text):
     return max(80, int(budget_bytes / 3 * 0.9))
 
 
+def ref_profile(ref_wav, ref_text):
+    """The reference exactly as F5-TTS will see it.
+
+    F5-TTS does not use your wav as-is: preprocess_ref_audio_text strips the
+    silent edges, clips anything over 12 s and appends 50 ms. Timing against
+    the file on disk would therefore be timing against the wrong length. It
+    caches on the file's md5, so asking for it here costs nothing later.
+    """
+    from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+    path, text = preprocess_ref_audio_text(
+        ref_wav, ref_text, show_info=lambda *a, **k: None)
+    return path, text, sf.info(path).duration
+
+
+def plan_durations(items, ref_text, ref_sec, speed=1.0, pace=1.0, log=print):
+    """Seconds to allot each chunk, from syllables rather than bytes.
+
+    Returns None if the pacing module is unavailable, in which case we fall
+    back to F5-TTS's own byte estimate.
+    """
+    if pacing is None:
+        return None
+    rate = pacing.speech_rate(ref_text, ref_sec)
+    log("  " + pacing.rate_report(ref_text, ref_sec))
+    # The whole output inherits the reference clip's tempo. A brisk clip makes
+    # every story brisk, no matter what the text is.
+    if rate > 7.5:
+        log(f"  NOTE: that reference is quick for narration "
+            f"(~{rate:.1f} vs ~6 moras/sec). Everything will inherit its tempo - "
+            f"raise Roominess to ~1.2, or record a calmer reference clip.")
+    # speed is folded in here because fix_duration overrides F5-TTS's own
+    # speed handling entirely - lower speed simply means more time.
+    roominess = 1.08 * float(pace) / max(0.4, float(speed))
+    headroom = max(2.0, 22.0 - ref_sec)
+    out, clipped = [], 0
+    for chunk, _ in items:
+        est = pacing.estimate_seconds(chunk, rate, roominess=roominess)
+        if est > headroom:
+            est, clipped = headroom, clipped + 1
+        out.append(est)
+    if clipped:
+        log(f"  {clipped} chunk(s) hit the {headroom:.1f}s per-pass ceiling - "
+            f"use a shorter reference clip or smaller chunks")
+    return out, rate
+
+
 def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                pauses, use_dict, dict_rows, auto_translit, device,
                out_name=None, on_progress=None, log=print,
                cfg=2.0, sway=-1.0, trim=True, drop_directions=True,
-               expand_nums=True, one_pass=True):
+               expand_nums=True, one_pass=True,
+               pace=1.0, fit_duration=True, per_sentence=True,
+               seed=None, retry_short=True):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
@@ -442,9 +539,22 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             log(f"  chunk size {int(max_chars)} -> {cap} so every chunk renders "
                 f"in a single pass (avoids F5-TTS's internal seams)")
             max_chars = cap
-    items = split_blocks(text, int(max_chars))
+    items = split_blocks(text, int(max_chars), per_sentence=per_sentence)
     if not items:
         raise RuntimeError("Nothing to say.")
+
+    # Budget each chunk's duration ourselves. See pacing.py for why F5-TTS's
+    # own byte-count estimate rushes some lines and drawls others.
+    ref_norm, ref_sec, plan, rate = ref_txt.strip(), 0.0, None, 0.0
+    if fit_duration:
+        try:
+            _, ref_norm, ref_sec = ref_profile(ref_wav, ref_txt.strip())
+            planned = plan_durations(items, ref_norm, ref_sec,
+                                     speed=speed, pace=pace, log=log)
+            if planned:
+                plan, rate = planned
+        except Exception as e:
+            log(f"  duration planning unavailable ({e}); using F5-TTS's estimate")
 
     tts = get_tts(ckpt, vocab, device)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -466,6 +576,12 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                   speed=float(speed), nfe_step=int(nfe),
                   cfg_strength=float(cfg), sway_sampling_coef=float(sway),
                   remove_silence=False)   # we trim ourselves, see trim_silence
+        if seed is not None:
+            kw["seed"] = int(seed) + i     # reproducible, still varied per chunk
+        want = plan[i - 1] if plan else None
+        if want is not None:
+            # fix_duration is the TOTAL canvas: reference + speech
+            kw["fix_duration"] = ref_sec + want
         try:
             wav, sr, _ = tts.infer(gen_text=chunk, **kw)
         except torch.cuda.OutOfMemoryError:
@@ -485,13 +601,31 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                                f"switch device to cpu.")
         if trim:
             wav = trim_silence(wav, sr)
-        wav = fade_edges(wav, sr)         # no clicks where chunks meet
 
-        # a chunk far shorter than its text implies the model truncated it
-        expected = len(chunk) / 16.0      # ~16 Devanagari chars per second
-        if expected > 2.0 and len(wav) / sr < expected * 0.55:
-            log(f"  chunk {i}: only {len(wav)/sr:.1f}s for {len(chunk)} chars "
-                f"- likely truncated, consider a smaller chunk size")
+        # If the model used far less time than the text needs, it very likely
+        # skipped something - this is the "whole word missing" failure. One
+        # re-roll on a different seed usually lands it, and costs one pass.
+        # (a short line legitimately finishes early, so only judge longer ones)
+        if (want is not None and retry_short and want > 2.0
+                and len(wav) / sr < want * 0.58):
+            log(f"  chunk {i}: {len(wav)/sr:.1f}s used of {want:.1f}s planned "
+                f"- suspect a dropped word, re-rolling once")
+            try:
+                kw2 = dict(kw)
+                kw2["seed"] = (int(seed) + i if seed is not None
+                               else random.randint(0, 2**31 - 1))
+                kw2["fix_duration"] = ref_sec + want * 1.06
+                w2, sr, _ = tts.infer(gen_text=chunk, **kw2)
+                w2 = np.asarray(w2, dtype=np.float32)
+                if not np.isnan(w2).any():
+                    if trim:
+                        w2 = trim_silence(w2, sr)
+                    if len(w2) > len(wav):      # keep whichever said more
+                        wav = w2
+            except Exception as e:
+                log(f"  chunk {i}: re-roll failed ({e}), keeping the first take")
+
+        wav = fade_edges(wav, sr)         # no clicks where chunks meet
 
         sf.write(run_dir / f"{i:04d}.wav", wav, sr)   # never lose a long run
         pieces.append(wav)
@@ -515,7 +649,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
 def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              use_dict, dict_rows, auto_translit, device_choice,
              line_pause, para_pause, title, cfg, trim, drop_dir,
-             expand_nums, one_pass,
+             expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -527,8 +661,8 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
         return None, "Reference transcript is empty - it must match the clip word for word."
 
     device = DEVICE if device_choice == "auto" else device_choice
-    pauses = {"chunk": int(pause_ms), "line": int(line_pause),
-              "para": int(para_pause), "end": 0}
+    pauses = {"chunk": int(pause_ms), "sent": int(sent_pause),
+              "line": int(line_pause), "para": int(para_pause), "end": 0}
     progress(0, desc=f"Loading model on {device}...")
     try:
         out_path, dur, took, n, run_dir = synthesize(
@@ -536,7 +670,8 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             use_dict, dict_rows, auto_translit, device, out_name=title,
             on_progress=lambda f, d: progress(f, desc=d),
             cfg=cfg, trim=trim, drop_directions=drop_dir,
-            expand_nums=expand_nums, one_pass=one_pass)
+            expand_nums=expand_nums, one_pass=one_pass,
+            pace=pace, fit_duration=fit_dur, per_sentence=per_sent)
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -588,7 +723,8 @@ def clear_queue():
 def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, cfg=2.0, trim=True, drop_dir=True,
-              expand_nums=True, one_pass=True, progress=gr.Progress()):
+              expand_nums=True, one_pass=True, sent_pause=260, pace=1.0,
+              fit_dur=True, per_sent=True, progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
     jobs = list_queue()
@@ -598,8 +734,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
         return queue_table(), "Pick a checkpoint, a reference clip and its transcript first."
 
     device = DEVICE if device_choice == "auto" else device_choice
-    pauses = {"chunk": int(pause_ms), "line": int(line_pause),
-              "para": int(para_pause), "end": 0}
+    pauses = {"chunk": int(pause_ms), "sent": int(sent_pause),
+              "line": int(line_pause), "para": int(para_pause), "end": 0}
     log_lines, t_all = [], time.time()
 
     for j, name in enumerate(jobs, 1):
@@ -618,7 +754,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                     ((_j - 1) + f) / len(jobs), desc=f"{title}: {d}"),
                 log=lambda m: log_lines.append("   " + m),
                 cfg=cfg, trim=trim, drop_directions=drop_dir,
-                expand_nums=expand_nums, one_pass=one_pass)
+                expand_nums=expand_nums, one_pass=one_pass,
+                pace=pace, fit_duration=fit_dur, per_sentence=per_sent)
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -743,6 +880,32 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                         info="Caps chunk size so F5-TTS never splits a chunk "
                              "internally. Its hidden cross-fades are what make "
                              "sentences sound broken or words slurred.")
+                    per_sent = gr.Checkbox(
+                        True, label="One sentence per chunk (recommended)",
+                        info="Gives every sentence its own start, end and pause "
+                             "instead of letting the model run them together.")
+                with gr.Accordion("Pacing", open=True):
+                    gr.Markdown(
+                        "F5-TTS decides how long a line may take from its "
+                        "**UTF-8 byte count**. In Devanagari that is close to "
+                        "meaningless — a matra or halant costs 3 bytes and adds "
+                        "no time, so `स्वप्न` is given 2.3× the time per syllable "
+                        "that `कमल` gets. Starved lines rush, race, run "
+                        "sentences together, clip their last word, and in the "
+                        "worst case **drop a word entirely**.\n\n"
+                        "With this on the budget is computed from actual "
+                        "syllables, calibrated against your reference clip's own "
+                        "measured speaking rate."
+                    )
+                    fit_dur = gr.Checkbox(
+                        True, label="Budget duration by syllables (recommended)",
+                        info="Off = F5-TTS's byte-count guess, i.e. the old "
+                             "behaviour.")
+                    pace = gr.Slider(
+                        0.85, 1.35, 1.0, step=0.01, label="Roominess",
+                        info="Extra time on top of the estimate. Raise it if the "
+                             "delivery still feels hurried or words go missing; "
+                             "lower it if lines drawl or trail into noise.")
                 with gr.Accordion("Pauses", open=True):
                     gr.Markdown(
                         "Your **line breaks are respected**: press Enter for a "
@@ -751,6 +914,13 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                     )
                     pause_ms = gr.Slider(0, 800, 150, step=25,
                                          label="Within a long line (ms)")
+                    sent_pause = gr.Slider(0, 1200, 260, step=20,
+                                           label="At a full stop (ms)",
+                                           info="Only applies with one-sentence-"
+                                                "per-chunk on. Inside a chunk the "
+                                                "model chooses how long to rest at "
+                                                "a '.', and under time pressure it "
+                                                "chooses not to.")
                     line_pause = gr.Slider(0, 1500, 350, step=50,
                                            label="At a line break (ms)")
                     para_pause = gr.Slider(0, 3000, 800, step=100,
@@ -881,7 +1051,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
              [script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, title, cfg, trim, drop_dir,
-              expand_nums, one_pass],
+              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -891,7 +1061,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                 [ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                  use_dict, dict_rows, auto_translit, device_choice,
                  line_pause, para_pause, cfg, trim, drop_dir,
-                 expand_nums, one_pass],
+                 expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)

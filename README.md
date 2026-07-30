@@ -44,6 +44,7 @@ Built for a specific job: producing long-form Marathi horror-story narration (�
 - **Pronunciation dictionary** — word-level overrides that always beat the automatic conversion. The practical handle for Marathi's dental vs palatal च/ज.
 - **Stage directions skipped** — `[वातावरणनिर्मिती ...]` and `*[सूचना: ...]*` cues are stripped, not narrated.
 - **Numbers read as Marathi words** — `३०४ → तीनशे चार`, `1994 → एकोणीसशे चौऱ्याण्णव`, `2019 → दोन हजार एकोणीस`, `MH 09 BT → एम एच शून्य नऊ बी टी`, `११:४५ → अकरा पंचेचाळीस`. Digits are barely present in the training data, so left alone they come out wrong or get skipped.
+- **Syllable-based pacing** — speech time is budgeted from real Devanagari syllables rather than F5-TTS's UTF-8 byte count, which under-allots plain text by more than half. This is the fix for rushed delivery, sentences running together, clipped final words, and words going missing.
 - **Single-pass chunking** — chunk size is capped to what F5-TTS can render in one forward pass, so it never splits and cross-fades behind your back. This is the fix for broken sentences and slurred words.
 - **Layout-driven pacing** — your line breaks and blank lines become real pauses, each join fade-matched so it cannot click.
 - **Reference clip manager** — record or upload clips per mood (calm, tense, dialogue) with their transcripts; switching clips is the main control over delivery.
@@ -118,7 +119,44 @@ python tools/slim_ckpt.py model_last.pt model_last_slim.pt   # 5.02 GB -> 2.51 G
 | **Pauses** | ms | Within-line 150 · line break 350 · paragraph 800 |
 | **Read numbers as words** | on | ३०४ → तीनशे चार · 1994 → एकोणीसशे चौऱ्याण्णव · 09 → शून्य नऊ · ११:४५ → अकरा पंचेचाळीस |
 | **Single-pass chunks** | on | See below |
+| **Budget duration by syllables** | on | See below — this is the fix for rushing and dropped words |
+| **Roominess** | 0.85 – 1.35 | Extra time on top of the estimate. Raise if delivery is hurried, lower if lines drawl |
+| **One sentence per chunk** | on | Each sentence gets its own start, end and pause instead of running together |
 | `sway_sampling_coef` | −1 | Fixed |
+
+### Syllable-based duration — the fix for rushing and dropped words
+
+F5-TTS decides how long a line may take **before it generates anything**, from
+its UTF-8 byte count:
+
+```python
+duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
+```
+
+For Devanagari that is close to meaningless. Every codepoint costs 3 bytes
+whether or not it takes time to say — a matra, an anusvara and the halant all
+cost 3 bytes, and the halant makes a word *shorter* by deleting the inherent
+vowel. `कमल` is 3.0 bytes per syllable; `स्वप्न` is 6.9. A plain line gets less
+than half the time a conjunct-heavy one gets.
+
+Starved lines rush, start fast, run sentences together, clip their last word,
+and past a point **drop words entirely**. Auditing two real stories with
+`tools/pacing_report.py` found 103 of 103 and 102 of 103 lines under-allotted;
+`"तर?"` had been given 0.3 seconds.
+
+`pacing.py` counts real syllables instead, weights long vowels, nasals and
+conjuncts, adds time for punctuation, calibrates against your reference clip's
+**measured** speaking rate, and passes F5-TTS an explicit `fix_duration`.
+
+Audit your own scripts:
+
+```bash
+python tools/pacing_report.py queue/*.txt
+```
+
+> Your whole output inherits the reference clip's tempo. If the clip is brisk,
+> every story is brisk — the app warns you above ~7.5 moras/sec. Either raise
+> **Roominess** or record a calmer reference.
 
 ### Single-pass chunks — the fix for broken sentences
 

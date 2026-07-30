@@ -1,5 +1,89 @@
 # Changelog
 
+## [v1.2.0] — 2026-07-30 · Pacing
+
+v1.1.0 fixed how chunks were *joined*. This fixes how long each chunk is
+allowed to *take*, which turned out to be the cause of most of what was still
+wrong: rushing, racing starts, sentences running together, clipped final
+words, and words disappearing entirely.
+
+### The bug, in one line
+
+F5-TTS budgets speech time by **UTF-8 byte count**:
+
+```python
+duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
+```
+
+In Devanagari that is close to meaningless. Every codepoint costs 3 bytes
+whether or not it takes time to say — matras, anusvara and the halant all cost
+3 bytes each, and the halant actually makes a word *shorter* by deleting the
+inherent vowel. So:
+
+| word | bytes | syllables | bytes per syllable |
+|---|---|---|---|
+| `कमल` | 9 | 3 | **3.0** |
+| `शाळा` | 12 | 2 | 6.0 |
+| `स्वप्न` | 18 | 2.6 | **6.9** |
+
+A line of plain consonants gets less than half the time a conjunct-heavy line
+gets. Running the audit over two of the twelve QA stories: **103 of 103 lines
+under-allotted in one, 102 of 103 in the other.** `"तर?"` was given 0.3
+seconds. `शाळा बंद होती.` was given 1.04 s when it needs 1.65 s — which is
+exactly why `शाळा` went missing.
+
+### Fixed
+
+- **New `pacing.py`** counts actual Devanagari syllables (aksharas), weights
+  long vowels, nasals and conjuncts, adds real time for punctuation, and
+  calibrates against the reference clip's own **measured** speaking rate. The
+  result is passed to F5-TTS as an explicit `fix_duration`. Toggle:
+  *Budget duration by syllables*.
+- **Reference length is now measured correctly.** F5-TTS does not use the wav
+  on disk — `preprocess_ref_audio_text` strips the silent edges and appends
+  50 ms. Timing against the file on disk was timing against the wrong number
+  (5.60 s vs the 5.37 s actually used).
+- **One sentence per chunk.** Packing several sentences into one chunk left the
+  model to decide how long to rest at a full stop, and under time pressure it
+  decided *not to*. Each sentence now gets its own start, end, and a real
+  pause. Sentences under 26 characters are merged with a neighbour, because
+  F5-TTS is unstable on tiny utterances.
+- **Edge fades no longer clip word onsets.** v1.1.0 faded every chunk edge
+  unconditionally, which ate the first syllable of any chunk that began on
+  speech — a fix that caused the thing it was meant to prevent. Fades now only
+  run into material that is already quiet; a loud edge gets padded instead.
+- **Automatic re-roll on suspected dropped words.** If a chunk uses under 58 %
+  of its planned time, it is regenerated once on a different seed and the
+  fuller take is kept.
+- **Warning when the reference clip is brisk.** The entire output inherits the
+  reference's tempo. Above ~7.5 moras/sec the log now says so and suggests
+  raising Roominess or recording a calmer clip.
+
+### Added
+
+- **Roominess** slider (0.85–1.35) — extra time on top of the estimate. Raise
+  it if delivery still feels hurried; lower it if lines drawl.
+- **Pause at a full stop** slider (default 260 ms).
+- **`tools/pacing_report.py`** — audit any script and see which lines were
+  being starved, worst first. Run it against a story you already disliked; the
+  flagged lines should be the ones that sounded wrong.
+- `seed` for reproducible generation (`--seed` in the queue runner).
+- Queue runner flags: `--pace`, `--sent-pause`, `--byte-duration`,
+  `--no-sentence-split`, `--seed`.
+
+### Known, and not fixable here
+
+`ळ` read as `ल`, `थांबले` read as `थांबला`, and mispronounced proper nouns like
+`कोल्हापूर` are **training-data** problems, not pipeline problems. The
+fine-tuning transcripts were produced by Whisper large-v3, which misspells
+Marathi — it writes `ल` for `ळ` and normalises verb endings. The model learned
+whatever the transcripts said. No inference setting fixes this. The options are
+pronunciation-dictionary respellings, trying `model_8000.pt` (less overfit to
+the bad transcripts than `model_last.pt`), or correcting `metadata.csv` and
+retraining.
+
+---
+
 ## [v1.1.0] — 2026-07-29 · Audio quality
 
 Everything here came from listening to twelve generated stories and writing down

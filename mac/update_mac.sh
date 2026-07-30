@@ -25,7 +25,7 @@ fi
 
 echo
 echo "==> copying app files into $HOME_DIR"
-for f in app.py translit.py numerals.py run_queue.py; do
+for f in app.py translit.py numerals.py pacing.py run_queue.py; do
   [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true
@@ -48,7 +48,7 @@ cd "$HOME_DIR"          # import from the install, not from the repo checkout
 "$HOME_DIR/venv/bin/python" - <<'PY'
 import sys
 ok = True
-for m in ("numerals", "translit"):
+for m in ("numerals", "translit", "pacing"):
     try:
         __import__(m)
         print(f"   {m}: ok")

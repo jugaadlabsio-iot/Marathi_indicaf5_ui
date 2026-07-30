@@ -92,6 +92,7 @@ previous version back — the model is untouched, so the comparison is fair.
 app.py                the web UI
 translit.py           English -> Devanagari transliteration
 numerals.py           numbers -> Marathi words (304 -> तीनशे चार)
+pacing.py             syllable-based duration budget (stops the rushing)
 run_queue.py          headless overnight batch runner
 setup_mac.sh          installer
 update_mac.sh         updater for an existing install

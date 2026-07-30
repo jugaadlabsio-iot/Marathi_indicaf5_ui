@@ -37,6 +37,14 @@ p.add_argument("--keep-digits", action="store_true",
                help="do NOT spell numbers out as Marathi words")
 p.add_argument("--allow-splits", action="store_true",
                help="let F5-TTS split long chunks itself (its seams cause slurring)")
+p.add_argument("--sent-pause", type=int, default=260, help="pause at a full stop (ms)")
+p.add_argument("--pace", type=float, default=1.0,
+               help="roominess; >1 gives every line more time (fixes rushing)")
+p.add_argument("--byte-duration", action="store_true",
+               help="use F5-TTS's byte-count duration guess instead of syllables")
+p.add_argument("--no-sentence-split", action="store_true",
+               help="pack several sentences per chunk (they will run together)")
+p.add_argument("--seed", type=int, default=None, help="reproducible generation")
 a = p.parse_args()
 
 ckpts = app.list_ckpts()
@@ -57,7 +65,8 @@ if not ref_txt:
     sys.exit(f"No transcript beside {ref} - create a matching .txt")
 
 device = app.DEVICE if a.device == "auto" else a.device
-pauses = {"chunk": a.pause, "line": a.line_pause, "para": a.para_pause, "end": 0}
+pauses = {"chunk": a.pause, "sent": a.sent_pause, "line": a.line_pause,
+          "para": a.para_pause, "end": 0}
 d = app.load_dict()
 
 jobs = app.list_queue()
@@ -90,7 +99,9 @@ for i, name in enumerate(jobs, 1):
             cfg=a.cfg, trim=not a.no_trim,
             drop_directions=not a.keep_directions,
             expand_nums=not a.keep_digits,
-            one_pass=not a.allow_splits)
+            one_pass=not a.allow_splits,
+            pace=a.pace, fit_duration=not a.byte_duration,
+            per_sentence=not a.no_sentence_split, seed=a.seed)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1
