@@ -101,6 +101,28 @@ _PLATE_CTX = re.compile(
 
 _TIME = re.compile(r"(?<=[0-9०-९])\s*[:：]\s*(?=[0-9०-९])")
 
+# Symbols the model has no character for, so it simply skips them: "50%" came
+# out as "पन्नास" with the percent silently dropped.
+SYMBOLS = [
+    ("%", " टक्के"), ("₹", "रुपये "), ("°", " अंश"),
+    ("&", " आणि "), ("×", " गुणिले "), ("=", " बरोबर "), ("@", " ॲट "),
+]
+_RS = re.compile(r"\b(?:Rs\.?|INR)\s*", re.I)
+
+
+def expand_symbols(text):
+    """Say the symbols out loud.
+
+    Runs AFTER the digits are spelled out, so by now "50%" is "पन्नास%" and
+    only the sign is left to convert.
+    """
+    if not text:
+        return text
+    text = _RS.sub("रुपये ", text)
+    for sym, word in SYMBOLS:
+        text = text.replace(sym, word)
+    return re.sub(r"[ \t]{2,}", " ", text)
+
 
 def expand_numbers(text, plate_mode=False):
     """Replace every run of digits with Marathi words."""
@@ -120,7 +142,7 @@ def expand_numbers(text, plate_mode=False):
             return year_to_words(n)      # 4-digit numbers in stories are usually years
         return number_to_words(n)
 
-    return _TOKEN.sub(repl, text)
+    return expand_symbols(_TOKEN.sub(repl, text))
 
 
 if __name__ == "__main__":
