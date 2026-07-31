@@ -421,8 +421,8 @@ def split_sentences(line, max_chars, min_chars=MIN_SENT_CHARS):
 _CLAUSE = re.compile(r"(?<=[,;:—–])\s+")
 
 
-def split_by_duration(items, rate, max_secs, roominess=1.08):
-    """Break any chunk that would run longer than `max_secs` of speech.
+def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
+    """Shorten long chunks - but only where the language offers a seam.
 
     Measured on a real run: the model pronounces ळ, मी and च correctly in
     short phrases (1-2 s) and loses them in long ones (the stories ran to a
@@ -430,15 +430,36 @@ def split_by_duration(items, rate, max_secs, roominess=1.08):
     control this, because characters are a poor proxy for duration - which is
     the whole reason pacing.py exists. So cap by the estimate instead.
 
-    Splits at clause punctuation first, since a comma is somewhere a pause
-    belongs anyway; only falls back to word boundaries if a clause is still
-    too long on its own.
+    The important restraint is WHERE. Splitting at any convenient word cost
+    35% of chunks a mid-phrase cut on the first attempt ("गणपतराव देशमुख यांना
+    त्या" as its own render): each fragment gets sentence-final intonation and
+    a pause lands where no grammatical break exists, which sounds worse than
+    the slurring it was meant to fix. So we split at clause punctuation only.
+    A sentence with nothing to split on stays whole even if it runs over -
+    long is better than butchered.
+
+    `hard_secs` is the exception: past that a chunk risks F5-TTS's own
+    internal splitting, whose seams we cannot control at all, so a word-level
+    cut becomes the lesser evil.
     """
     if pacing is None or max_secs <= 0:
         return items
 
     def secs(t):
         return pacing.estimate_seconds(t, rate, roominess=roominess)
+
+    def by_words(part):
+        out, cur = [], ""
+        for w in part.split(" "):
+            trial = (cur + " " + w).strip()
+            if cur and secs(trial) > max_secs:
+                out.append(cur)
+                cur = w
+            else:
+                cur = trial
+        if cur:
+            out.append(cur)
+        return out
 
     def cut(text):
         if secs(text) <= max_secs:
@@ -448,19 +469,12 @@ def split_by_duration(items, rate, max_secs, roominess=1.08):
             part = part.strip()
             if not part:
                 continue
-            if secs(part) <= max_secs:
+            # over the cap but nothing to split on: leave it intact, unless it
+            # is long enough that F5-TTS would split it for us
+            if secs(part) > hard_secs:
+                out.extend(by_words(part))
+            else:
                 out.append(part)
-                continue
-            words, cur = part.split(" "), ""      # last resort: pack by words
-            for w in words:
-                trial = (cur + " " + w).strip()
-                if cur and secs(trial) > max_secs:
-                    out.append(cur)
-                    cur = w
-                else:
-                    cur = trial
-            if cur:
-                out.append(cur)
         return out or [text]
 
     grown = []
