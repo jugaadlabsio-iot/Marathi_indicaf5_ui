@@ -45,6 +45,9 @@ p.add_argument("--byte-duration", action="store_true",
 p.add_argument("--no-sentence-split", action="store_true",
                help="pack several sentences per chunk (they will run together)")
 p.add_argument("--seed", type=int, default=None, help="reproducible generation")
+p.add_argument("--max-secs", type=float, default=3.2,
+               help="split so no chunk exceeds this many seconds (0 = no cap); "
+                    "long chunks slur the retroflexes")
 a = p.parse_args()
 
 ckpts = app.list_ckpts()
@@ -101,7 +104,8 @@ for i, name in enumerate(jobs, 1):
             expand_nums=not a.keep_digits,
             one_pass=not a.allow_splits,
             pace=a.pace, fit_duration=not a.byte_duration,
-            per_sentence=not a.no_sentence_split, seed=a.seed)
+            per_sentence=not a.no_sentence_split, seed=a.seed,
+            max_secs=a.max_secs)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Marathi Story Voice - local web UI for your fine-tuned IndicF5 voice.
 
@@ -277,6 +277,23 @@ def fade_edges(wav, sr, ms=6):
     return out
 
 
+def ends_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
+    """Was the model still talking when its allotted time ran out?
+
+    Speech that finishes naturally trails off. Speech that is still within
+    18 dB of the chunk's peak at the very last moment was cut - that is the
+    clipped final word, and unlike 'sounds wrong' it is measurable.
+    """
+    n = int(sr * window_ms / 1000)
+    if wav.size < 2 * n:
+        return False
+    peak = float(np.abs(wav).max())
+    if peak < 1e-6:
+        return False
+    tail = float(np.sqrt((wav[-n:] ** 2).mean()))
+    return 20 * np.log10(max(tail, 1e-9) / peak) > thresh_db
+
+
 def trim_silence(wav, sr, thresh_db=-55.0, keep_ms=120):
     """Trim leading/trailing silence ourselves.
 
@@ -399,6 +416,59 @@ def split_sentences(line, max_chars, min_chars=MIN_SENT_CHARS):
         for i, p in enumerate(parts):
             out.append((p, "chunk" if i < len(parts) - 1 else "sent"))
     return out
+
+
+_CLAUSE = re.compile(r"(?<=[,;:—–])\s+")
+
+
+def split_by_duration(items, rate, max_secs, roominess=1.08):
+    """Break any chunk that would run longer than `max_secs` of speech.
+
+    Measured on a real run: the model pronounces ळ, मी and च correctly in
+    short phrases (1-2 s) and loses them in long ones (the stories ran to a
+    4 s median and 15 s worst case). Capping by character count does not
+    control this, because characters are a poor proxy for duration - which is
+    the whole reason pacing.py exists. So cap by the estimate instead.
+
+    Splits at clause punctuation first, since a comma is somewhere a pause
+    belongs anyway; only falls back to word boundaries if a clause is still
+    too long on its own.
+    """
+    if pacing is None or max_secs <= 0:
+        return items
+
+    def secs(t):
+        return pacing.estimate_seconds(t, rate, roominess=roominess)
+
+    def cut(text):
+        if secs(text) <= max_secs:
+            return [text]
+        out = []
+        for part in _CLAUSE.split(text):
+            part = part.strip()
+            if not part:
+                continue
+            if secs(part) <= max_secs:
+                out.append(part)
+                continue
+            words, cur = part.split(" "), ""      # last resort: pack by words
+            for w in words:
+                trial = (cur + " " + w).strip()
+                if cur and secs(trial) > max_secs:
+                    out.append(cur)
+                    cur = w
+                else:
+                    cur = trial
+            if cur:
+                out.append(cur)
+        return out or [text]
+
+    grown = []
+    for text, kind in items:
+        pieces = cut(text)
+        for i, p in enumerate(pieces):
+            grown.append((p, "chunk" if i < len(pieces) - 1 else kind))
+    return grown
 
 
 def split_blocks(text, max_chars=400, per_sentence=True):
@@ -524,7 +594,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                cfg=2.0, sway=-1.0, trim=True, drop_directions=True,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
-               seed=None, retry_short=True):
+               seed=None, retry_short=True, max_secs=3.2):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
@@ -549,6 +619,14 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
     if fit_duration:
         try:
             _, ref_norm, ref_sec = ref_profile(ref_wav, ref_txt.strip())
+            rate = pacing.speech_rate(ref_norm, ref_sec) if pacing else 0.0
+            if rate and max_secs and max_secs > 0:
+                before = len(items)
+                items = split_by_duration(items, rate, float(max_secs),
+                                          1.08 * float(pace) / max(0.4, float(speed)))
+                if len(items) != before:
+                    log(f"  {before} -> {len(items)} chunks, so none runs over "
+                        f"{float(max_secs):.1f}s (long chunks slur ळ, मी and च)")
             planned = plan_durations(items, ref_norm, ref_sec,
                                      speed=speed, pace=pace, log=log)
             if planned:
@@ -599,6 +677,21 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
         if np.isnan(wav).any():
             raise RuntimeError(f"Chunk {i} produced NaN (float16 failure mode); "
                                f"switch device to cpu.")
+
+        # Still at full voice when the canvas ended = cut off mid-word. Give it
+        # more room and render again; measured at 5% of chunks before this.
+        if want is not None and retry_short and ends_mid_word(wav, sr):
+            log(f"  chunk {i}: ended mid-word, re-rendering with more time")
+            try:
+                kw3 = dict(kw)
+                kw3["fix_duration"] = ref_sec + want * 1.30
+                w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
+                w3 = np.asarray(w3, dtype=np.float32)
+                if not np.isnan(w3).any() and not ends_mid_word(w3, sr):
+                    wav = w3
+            except Exception as e:
+                log(f"  chunk {i}: re-render failed ({e}), keeping the first take")
+
         if trim:
             wav = trim_silence(wav, sr)
 
@@ -671,7 +764,8 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             on_progress=lambda f, d: progress(f, desc=d),
             cfg=cfg, trim=trim, drop_directions=drop_dir,
             expand_nums=expand_nums, one_pass=one_pass,
-            pace=pace, fit_duration=fit_dur, per_sentence=per_sent)
+            pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
+            max_secs=max_secs)
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -724,7 +818,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, cfg=2.0, trim=True, drop_dir=True,
               expand_nums=True, one_pass=True, sent_pause=260, pace=1.0,
-              fit_dur=True, per_sent=True, progress=gr.Progress()):
+              fit_dur=True, per_sent=True, max_secs=3.2,
+              progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
     jobs = list_queue()
@@ -755,7 +850,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                 log=lambda m: log_lines.append("   " + m),
                 cfg=cfg, trim=trim, drop_directions=drop_dir,
                 expand_nums=expand_nums, one_pass=one_pass,
-                pace=pace, fit_duration=fit_dur, per_sentence=per_sent)
+                pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
+            max_secs=max_secs)
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -901,6 +997,14 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                         True, label="Budget duration by syllables (recommended)",
                         info="Off = F5-TTS's byte-count guess, i.e. the old "
                              "behaviour.")
+                    max_secs = gr.Slider(
+                        0.0, 8.0, 3.2, step=0.2,
+                        label="Max seconds per chunk",
+                        info="The model pronounces ळ, मी and च correctly in "
+                             "short phrases and slurs them in long ones. "
+                             "Measured: probe phrases 1-2s were all correct, "
+                             "story chunks ran 4s median / 15s worst and were "
+                             "not. 0 disables the cap.")
                     pace = gr.Slider(
                         0.85, 1.35, 1.0, step=0.01, label="Roominess",
                         info="Extra time on top of the estimate. Raise it if the "
@@ -1051,7 +1155,8 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
              [script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, title, cfg, trim, drop_dir,
-              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent],
+              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
+              max_secs],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -1061,7 +1166,8 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                 [ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                  use_dict, dict_rows, auto_translit, device_choice,
                  line_pause, para_pause, cfg, trim, drop_dir,
-                 expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent],
+                 expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
+              max_secs],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)

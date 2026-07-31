@@ -149,7 +149,7 @@ def speech_rate(ref_text, ref_seconds):
     return m / speaking
 
 
-def estimate_seconds(text, rate, roominess=1.08, tail=0.28):
+def estimate_seconds(text, rate, roominess=1.08, tail=0.35):
     """How long this chunk should be allowed to take.
 
     `roominess` is deliberate slack. Too little and the model crams or drops
