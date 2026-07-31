@@ -542,6 +542,12 @@ def single_batch_limit(ref_wav, ref_text):
     return max(80, int(budget_bytes / 3 * 0.9))
 
 
+# Hard ceiling on how much more time than the estimate a chunk may be given.
+# Above roughly 1.5x the model stops leaving the surplus as silence and starts
+# generating confident nonsense to fill it. See plan_durations.
+MAX_ROOMINESS = 1.45
+
+
 def ref_profile(ref_wav, ref_text):
     """The reference exactly as F5-TTS will see it.
 
@@ -574,7 +580,13 @@ def plan_durations(items, ref_text, ref_sec, speed=1.0, pace=1.0, log=print):
             f"raise Roominess to ~1.2, or record a calmer reference clip.")
     # speed is folded in here because fix_duration overrides F5-TTS's own
     # speed handling entirely - lower speed simply means more time.
-    roominess = 1.08 * float(pace) / max(0.4, float(speed))
+    #
+    # Ceiling is not arbitrary. Given a canvas far larger than the text needs,
+    # the model does not leave the extra as silence - it fills it. Measured on
+    # "मी म्हणालो, मी एकटाच आहे.": 1.4x estimate was clean, 1.8x came back as
+    # fluent-sounding babble that an ASR transcribed as Kannada. Over-allotting
+    # is not a safe direction to err in.
+    roominess = min(MAX_ROOMINESS, 1.08 * float(pace) / max(0.4, float(speed)))
     headroom = max(2.0, 22.0 - ref_sec)
     out, clipped = [], 0
     for chunk, _ in items:
@@ -594,7 +606,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                cfg=2.0, sway=-1.0, trim=True, drop_directions=True,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
-               seed=None, retry_short=True, max_secs=3.2):
+               seed=None, retry_short=True, max_secs=3.2,
+               lead_ms=350, tail_ms=900):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
@@ -684,7 +697,10 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             log(f"  chunk {i}: ended mid-word, re-rendering with more time")
             try:
                 kw3 = dict(kw)
-                kw3["fix_duration"] = ref_sec + want * 1.30
+                # `want` already carries the roominess; stacking another 30%
+                # on top of a high pace setting lands in the babble zone, so
+                # the extra is small and the total stays under the ceiling
+                kw3["fix_duration"] = ref_sec + want * 1.12
                 w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
                 w3 = np.asarray(w3, dtype=np.float32)
                 if not np.isnan(w3).any() and not ends_mid_word(w3, sr):
@@ -730,6 +746,18 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             pieces.append(np.zeros(int(sr * gap / 1000), dtype=np.float32))
 
     audio = np.concatenate(pieces)
+
+    # Breathing room at the very edges. trim_silence deliberately strips each
+    # chunk's own head and tail so the pauses between them are exact - but that
+    # leaves the FINISHED file starting 125ms in and, measured across the
+    # overnight run, ending 0-160ms after the last syllable. Several stories
+    # stopped dead at 0ms. That is what an abrupt start and a chopped ending
+    # actually are: not a truncated word, just no room around the speech.
+    audio = np.concatenate([
+        np.zeros(int(sr * lead_ms / 1000), dtype=np.float32),
+        audio,
+        np.zeros(int(sr * tail_ms / 1000), dtype=np.float32)])
+
     peak = float(np.abs(audio).max())
     if peak > 0:
         audio = audio / peak * 0.95
@@ -743,6 +771,7 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              use_dict, dict_rows, auto_translit, device_choice,
              line_pause, para_pause, title, cfg, trim, drop_dir,
              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
+             max_secs, lead_ms, tail_ms,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -765,7 +794,7 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             cfg=cfg, trim=trim, drop_directions=drop_dir,
             expand_nums=expand_nums, one_pass=one_pass,
             pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
-            max_secs=max_secs)
+            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms)
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -819,6 +848,7 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               line_pause, para_pause, cfg=2.0, trim=True, drop_dir=True,
               expand_nums=True, one_pass=True, sent_pause=260, pace=1.0,
               fit_dur=True, per_sent=True, max_secs=3.2,
+              lead_ms=350, tail_ms=900,
               progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
@@ -851,7 +881,7 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                 cfg=cfg, trim=trim, drop_directions=drop_dir,
                 expand_nums=expand_nums, one_pass=one_pass,
                 pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
-            max_secs=max_secs)
+            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms)
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -1029,6 +1059,16 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                                            label="At a line break (ms)")
                     para_pause = gr.Slider(0, 3000, 800, step=100,
                                            label="At a blank line / paragraph (ms)")
+                    lead_ms = gr.Slider(0, 2000, 350, step=50,
+                                        label="Silence before the first word (ms)")
+                    tail_ms = gr.Slider(0, 3000, 900, step=50,
+                                        label="Silence after the last word (ms)",
+                                        info="Chunks are trimmed so the gaps "
+                                             "between them are exact, which left "
+                                             "finished files ending 0-160ms after "
+                                             "the final syllable - the file simply "
+                                             "stopped. This is the room to breathe "
+                                             "at the very edges.")
                     gr.Markdown(
                         "Punctuation is passed through untouched, so it still does "
                         "its work: `.` short pause · `,` tiny · `...` dramatic · "
@@ -1156,7 +1196,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, title, cfg, trim, drop_dir,
               expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs],
+              max_secs, lead_ms, tail_ms],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -1167,7 +1207,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                  use_dict, dict_rows, auto_translit, device_choice,
                  line_pause, para_pause, cfg, trim, drop_dir,
                  expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs],
+              max_secs, lead_ms, tail_ms],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)
