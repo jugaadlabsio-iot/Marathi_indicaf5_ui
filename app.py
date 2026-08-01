@@ -277,7 +277,7 @@ def fade_edges(wav, sr, ms=6):
     return out
 
 
-def starts_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
+def starts_mid_word(wav, sr, window_ms=40.0, thresh_db=-25.0):
     """Was the opening syllable sliced off?
 
     F5-TTS generates [reference + target] as one utterance and then discards
@@ -299,12 +299,17 @@ def starts_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
     return 20 * np.log10(max(head, 1e-9) / peak) > thresh_db
 
 
-def ends_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
+def ends_mid_word(wav, sr, window_ms=40.0, thresh_db=-25.0):
     """Was the model still talking when its allotted time ran out?
 
-    Speech that finishes naturally trails off. Speech that is still within
-    18 dB of the chunk's peak at the very last moment was cut - that is the
-    clipped final word, and unlike 'sounds wrong' it is measurable.
+    Speech that finishes naturally trails off. Speech still close to the
+    chunk's peak at the very last moment was cut - that is the clipped final
+    word, and unlike 'sounds wrong' it is measurable.
+
+    The threshold was -18 dB and let two audibly-cut chunks through at -20.1
+    and -19.7 dB. A cleanly decaying ending measures around -90 dB, so there
+    is a wide gap to sit in; -25 dB catches the near misses without flagging
+    healthy chunks.
     """
     n = int(sr * window_ms / 1000)
     if wav.size < 2 * n:
