@@ -277,6 +277,28 @@ def fade_edges(wav, sr, ms=6):
     return out
 
 
+def starts_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
+    """Was the opening syllable sliced off?
+
+    F5-TTS generates [reference + target] as one utterance and then discards
+    the first `ref_audio_len` frames. When the model begins the target a shade
+    early it lands inside the discarded region and the first word loses its
+    onset. Speech that starts naturally eases in; audio already at full voice
+    in its first 40 ms began before the file did.
+
+    It shows up worst on the opening chunk of a story, where there is no
+    preceding audio to hide it - "the name the story starts with" getting cut.
+    """
+    n = int(sr * window_ms / 1000)
+    if wav.size < 2 * n:
+        return False
+    peak = float(np.abs(wav).max())
+    if peak < 1e-6:
+        return False
+    head = float(np.sqrt((wav[:n] ** 2).mean()))
+    return 20 * np.log10(max(head, 1e-9) / peak) > thresh_db
+
+
 def ends_mid_word(wav, sr, window_ms=40.0, thresh_db=-18.0):
     """Was the model still talking when its allotted time ran out?
 
@@ -418,6 +440,12 @@ def split_sentences(line, max_chars, min_chars=MIN_SENT_CHARS):
     return out
 
 
+# A full stop is the safest seam there is, so it is tried first. It has to be
+# listed separately because split_sentences() deliberately MERGES sentences
+# shorter than MIN_SENT_CHARS, and without this a merged group like
+# "सागर पवार. वय तीस. पुण्यात सॉफ्टवेअर कंपनीत काम." could never be broken up
+# again - it rendered as a single 5.7s chunk at the very opening of a story.
+_SENT_SEAM = re.compile(r"(?<=[।\.\?\!])\s+")
 _CLAUSE = re.compile(r"(?<=[,;:—–])\s+")
 
 
@@ -465,16 +493,24 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
         if secs(text) <= max_secs:
             return [text]
         out = []
-        for part in _CLAUSE.split(text):
-            part = part.strip()
-            if not part:
+        # full stops first, then commas - both are places a pause belongs
+        for sent in _SENT_SEAM.split(text):
+            sent = sent.strip()
+            if not sent:
                 continue
-            # over the cap but nothing to split on: leave it intact, unless it
-            # is long enough that F5-TTS would split it for us
-            if secs(part) > hard_secs:
-                out.extend(by_words(part))
-            else:
-                out.append(part)
+            if secs(sent) <= max_secs:
+                out.append(sent)
+                continue
+            for part in _CLAUSE.split(sent):
+                part = part.strip()
+                if not part:
+                    continue
+                # over the cap but nothing to split on: leave it intact, unless
+                # it is long enough that F5-TTS would split it for us
+                if secs(part) > hard_secs:
+                    out.extend(by_words(part))
+                else:
+                    out.append(part)
         return out or [text]
 
     grown = []
@@ -666,6 +702,17 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
     tag = re.sub(r"[^A-Za-z0-9_\-]+", "_", out_name or "")[:40]
     run_dir = PARTS_DIR / (f"{tag}_{stamp}" if tag else stamp)
     run_dir.mkdir(parents=True, exist_ok=True)
+    # Index of what each chunk wav says. Without this, "chunk 47 sounds wrong"
+    # cannot be traced back to the text that produced it, which is exactly the
+    # lookup every QA pass needs.
+    try:
+        (run_dir / "chunks.tsv").write_text(
+            "file\tkind\tplanned_s\ttext\n" + "\n".join(
+                f"{i:04d}.wav\t{k}\t{(plan[i-1] if plan else 0):.2f}\t{c}"
+                for i, (c, k) in enumerate(items, 1)),
+            encoding="utf-8")
+    except Exception:
+        pass
 
     pieces, sr, t0 = [], 24000, time.time()
     for i, (chunk, kind) in enumerate(items, 1):
@@ -705,10 +752,12 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             raise RuntimeError(f"Chunk {i} produced NaN (float16 failure mode); "
                                f"switch device to cpu.")
 
-        # Still at full voice when the canvas ended = cut off mid-word. Give it
-        # more room and render again; measured at 5% of chunks before this.
-        if want is not None and retry_short and ends_mid_word(wav, sr):
-            log(f"  chunk {i}: ended mid-word, re-rendering with more time")
+        # Still at full voice at either edge = cut off mid-word. Give it more
+        # room and render again; measured at 5% of chunks before this.
+        clipped_head = starts_mid_word(wav, sr)
+        if want is not None and retry_short and (ends_mid_word(wav, sr) or clipped_head):
+            where = "started" if clipped_head else "ended"
+            log(f"  chunk {i}: {where} mid-word, re-rendering with more time")
             try:
                 kw3 = dict(kw)
                 # `want` already carries the roominess; stacking another 30%
@@ -717,7 +766,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                 kw3["fix_duration"] = ref_sec + want * 1.12
                 w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
                 w3 = np.asarray(w3, dtype=np.float32)
-                if not np.isnan(w3).any() and not ends_mid_word(w3, sr):
+                if (not np.isnan(w3).any() and not ends_mid_word(w3, sr)
+                        and not starts_mid_word(w3, sr)):
                     wav = w3
             except Exception as e:
                 log(f"  chunk {i}: re-render failed ({e}), keeping the first take")

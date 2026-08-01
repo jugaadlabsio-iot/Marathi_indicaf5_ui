@@ -41,6 +41,29 @@ spec.loader.exec_module(app)
 
 # The sounds actually reported as wrong, each in a short carrier sentence so
 # the phoneme is heard in context and not just in isolation.
+# Inflected forms. The first probe tested base forms (शाळा, जवळ, वेळ) and every
+# one came out right, yet story 2 was still wrong - and every ळ-word in story 2
+# had been seen in training. What differs is the shape of the syllable: the
+# stories use ळे, ळ्या, ळां, where the base forms use a bare ळ or ळा.
+INFLECTED = [
+    ("base  शाळा",    "शाळा बंद होती."),
+    ("ळे    शाळेत",   "तो शाळेत गेला."),
+    ("ळे    शाळेच्या", "शाळेच्या मागे विहीर होती."),
+    ("ळे    शाळेतून",  "ती शाळेतून बाहेर पडली."),
+    ("ळ्या  सगळ्यात",  "सगळ्यात शेवटी तो आला."),
+    ("ळ्या  पावसाळ्यात", "पावसाळ्यात रस्ता बंद होतो."),
+    ("ळा    मिळाल्या", "मला उत्तरं मिळाल्याशिवाय जाणार नाही."),
+    ("ळां   वाघुळांचा", "वटवाघुळांचा आवाज आला."),
+    ("ळ     गोळा",    "सगळे गोळा झाले."),
+    ("ळ     मंगळवारी", "मंगळवारी शाळा बंद असते."),
+    ("ळ     हळूहळू",  "हळूहळू अंधार पडत गेला."),
+    ("ळ     कळत",     "मला काही कळत नव्हतं."),
+    ("ळ     ओळखीची",  "ती ओळखीची वाटली."),
+    ("ळ     वळला",    "तो मागे वळला."),
+    ("ळ     पळाला",   "तो पळाला."),
+    ("ल     वळला/वलला", "तो वळला, तो वलला."),
+]
+
 PROBES = [
     ("ळ  शाळा",   "शाळा बंद होती."),
     ("ळ  बाळ",    "बाळ रडत होतं."),
@@ -77,6 +100,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--variants", nargs="*", default=None,
                    help='e.g. "शाळा=शाळा,शाल्हा,शाला"')
+    p.add_argument("--inflected", action="store_true",
+                   help="probe the inflected ळ forms the stories actually use")
     p.add_argument("--ckpt", default=None, help="one checkpoint instead of all")
     p.add_argument("--pace", type=float, default=1.2)
     p.add_argument("--device", default="auto")
@@ -107,6 +132,8 @@ def main():
                 if alt:
                     items.append((f"{word} -> {alt}", alt))
         tag = "variants"
+    elif a.inflected:
+        items, tag = INFLECTED, "inflected"
     else:
         items, tag = PROBES, "probe"
 
