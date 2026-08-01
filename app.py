@@ -1100,10 +1100,15 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                              "story chunks ran 4s median / 15s worst and were "
                              "not. 0 disables the cap.")
                     pace = gr.Slider(
-                        0.85, 1.35, 1.0, step=0.01, label="Roominess",
-                        info="Extra time on top of the estimate. Raise it if the "
-                             "delivery still feels hurried or words go missing; "
-                             "lower it if lines drawl or trail into noise.")
+                        0.85, 1.35, 1.35, step=0.01, label="Roominess",
+                        info="Extra time on top of the estimate. 1.35 is the "
+                             "tested default: the same sentence on 10 random "
+                             "seeds was clean 4 times out of 10 at 1.0, and 9 "
+                             "out of 10 here. Starved chunks rush whichever "
+                             "word is hardest, and which word that is changes "
+                             "with the seed. Do not go higher - the ceiling "
+                             "exists because a too-large canvas gets filled "
+                             "with invented speech.")
                 with gr.Accordion("Pauses", open=True):
                     gr.Markdown(
                         "Your **line breaks are respected**: press Enter for a "

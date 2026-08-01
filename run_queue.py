@@ -23,10 +23,10 @@ spec.loader.exec_module(app)          # safe: launch() is behind __main__
 p = argparse.ArgumentParser()
 p.add_argument("--ckpt", default=None, help="defaults to the slim checkpoint if present")
 p.add_argument("--ref", default=None, help="defaults to the shortest reference clip")
-p.add_argument("--nfe", type=int, default=16)
+p.add_argument("--nfe", type=int, default=32)
 p.add_argument("--speed", type=float, default=1.0)
 p.add_argument("--max-chars", type=int, default=400)
-p.add_argument("--pause", type=int, default=150)
+p.add_argument("--pause", type=int, default=250)
 p.add_argument("--line-pause", type=int, default=350)
 p.add_argument("--para-pause", type=int, default=800)
 p.add_argument("--device", default="auto")
@@ -37,14 +37,20 @@ p.add_argument("--keep-digits", action="store_true",
                help="do NOT spell numbers out as Marathi words")
 p.add_argument("--allow-splits", action="store_true",
                help="let F5-TTS split long chunks itself (its seams cause slurring)")
-p.add_argument("--sent-pause", type=int, default=260, help="pause at a full stop (ms)")
-p.add_argument("--pace", type=float, default=1.0,
-               help="roominess; >1 gives every line more time (fixes rushing)")
+p.add_argument("--sent-pause", type=int, default=300, help="pause at a full stop (ms)")
+p.add_argument("--pace", type=float, default=1.35,
+               help="roominess. 1.35 is the tested default: the same sentence "
+                    "on 10 random seeds was clean 4/10 at 1.0 and 9/10 here. "
+                    "A starved chunk rushes whichever word is hardest, and "
+                    "which word that is changes with the seed.")
 p.add_argument("--byte-duration", action="store_true",
                help="use F5-TTS's byte-count duration guess instead of syllables")
 p.add_argument("--no-sentence-split", action="store_true",
                help="pack several sentences per chunk (they will run together)")
-p.add_argument("--seed", type=int, default=None, help="reproducible generation")
+p.add_argument("--seed", type=int, default=1097657232,
+               help="fixed so a run is reproducible and a bad chunk can be "
+                    "re-rendered deliberately; F5-TTS otherwise draws a fresh "
+                    "random seed per chunk")
 p.add_argument("--lead", type=int, default=350, help="silence before the first word (ms)")
 p.add_argument("--tail", type=int, default=900, help="silence after the last word (ms)")
 p.add_argument("--max-secs", type=float, default=3.2,
