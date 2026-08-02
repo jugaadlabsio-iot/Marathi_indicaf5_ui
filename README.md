@@ -69,7 +69,7 @@ pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
 
-Put `model_last.pt` and `vocab.txt` in `C:\marathi_tts_models\`, then:
+Put `model_voice_merged50.pt` and `vocab.txt` in `C:\marathi_tts_models\`, then:
 
 ```bash
 start_ui.bat          # -> http://127.0.0.1:7860
@@ -101,6 +101,7 @@ Produce your own with [`notebooks/IndicF5_finetune_Kaggle.ipynb`](notebooks/Indi
 2. Whisper segments and transcribes it into training clips
 3. IndicF5 is converted to an F5-TTS checkpoint and fine-tuned
 4. Download `model_last.pt` + `vocab.txt` into your models folder
+5. **Merge it back toward the base model** — see below. Do not skip this.
 
 > **The `.zip` trap:** browsers save the checkpoint as `model_last.zip`. **That file already *is* the `.pt`** — a PyTorch checkpoint is a ZIP container internally. Do **not** unzip it; just rename it to `.pt`.
 
@@ -109,6 +110,31 @@ Shrink a training checkpoint for faster loading:
 ```bash
 python tools/slim_ckpt.py model_last.pt model_last_slim.pt   # 5.02 GB -> 2.51 GB
 ```
+
+### ⚠️ Merge the fine-tune back toward the base — do not skip this
+
+A straight fine-tune on ~1 hour comes out with **the right voice and broken
+Marathi**: `थांबलं` read as `थांबला`, `कोल्हापूर` with a `ळ`, names losing a
+syllable. IndicF5 already knew those words from hundreds of hours; 80 epochs
+over one voice **overwrote** that knowledge. Catastrophic forgetting.
+
+The fix is weight interpolation, not more data and not retraining:
+
+```bash
+python tools/merge_ckpt.py --base indicf5_base.pt --tuned model_last_slim.pt --sweep
+```
+
+Speaker identity lives in a small part of the weights while pronunciation is
+spread across all of them, so blending part-way back recovers the language and
+keeps the voice. **α = 0.5 was the pick here** — pronunciation correct, voice
+~90% intact. `--sweep` writes several blends to audition.
+
+Getting the base into a mergeable shape: it ships as `model.safetensors` with
+keys prefixed `ema_model._orig_mod.` plus a bundled `vocoder.*`. Strip **only**
+`_orig_mod.` and drop the vocoder — **keep `ema_model.`** — and all 364 tensors
+align. Stripping `ema_model.` too gives zero matches.
+
+Full reasoning and evidence: [WIKI.md §9](WIKI.md#9-catastrophic-forgetting--the-big-one).
 
 ---
 
