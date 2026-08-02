@@ -36,6 +36,10 @@ Built for a specific job: producing long-form Marathi horror-story narration (�
 
 ---
 
+> **[WIKI.md](WIKI.md) — the engineering log.** Every problem hit while
+> building this, what it actually turned out to be, and the numbers that
+> proved it. Read §9 first if pronunciation is wrong.
+
 ## ✨ Features
 
 - **Web UI on `localhost`** — paste a script, press Generate.
