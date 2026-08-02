@@ -54,13 +54,17 @@ pip install faster-whisper || echo "   faster-whisper skipped (auto-transcribe u
 
 echo
 echo "==> copying app files"
-for f in app.py translit.py numerals.py pacing.py run_queue.py pronunciation.json; do
+for f in app.py translit.py numerals.py pacing.py run_queue.py review.py pronunciation.json; do
   [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true
 chmod +x "$HOME_DIR/start_ui.command" 2>/dev/null || true
 mkdir -p "$HOME_DIR/ref"
 cp -v "$ROOT"/ref/* "$HOME_DIR/ref/" 2>/dev/null || true
+
+# the tools directory: merge_ckpt.py, repair.py, probe.py and the rest
+mkdir -p "$HOME_DIR/tools"
+cp -v "$ROOT"/tools/*.py "$HOME_DIR/tools/" 2>/dev/null || true
 
 echo
 echo "==> checking Apple Silicon acceleration"

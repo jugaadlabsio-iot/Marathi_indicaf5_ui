@@ -25,7 +25,7 @@ fi
 
 echo
 echo "==> copying app files into $HOME_DIR"
-for f in app.py translit.py numerals.py pacing.py run_queue.py; do
+for f in app.py translit.py numerals.py pacing.py run_queue.py review.py; do
   [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true
@@ -41,6 +41,10 @@ fi
 # reference transcripts ship in git; the .wav files never do
 mkdir -p "$HOME_DIR/ref"
 cp -vn "$ROOT"/ref/*.txt "$HOME_DIR/ref/" 2>/dev/null || true
+
+# the tools directory: merge_ckpt.py, repair.py, probe.py and the rest
+mkdir -p "$HOME_DIR/tools"
+cp -v "$ROOT"/tools/*.py "$HOME_DIR/tools/" 2>/dev/null || true
 
 echo
 echo "==> checking the new modules import"

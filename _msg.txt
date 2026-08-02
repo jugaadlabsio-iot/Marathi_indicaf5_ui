@@ -1,39 +1,20 @@
-Fix pronunciation by merging the fine-tune back toward base IndicF5
+Sync the Mac install with the merged model and the review UI
 
-The fine-tuned model had the right voice and the wrong Marathi: थांबलं read as
-थांबला, लायब्ररी mangled, कोल्हापूर with a ळ, अनन्या as "anya". The errors were
-scattered - a different word each render - and a day of pipeline work on
-chunking, durations, seeds and edges never touched them.
+The Mac scripts had drifted: they copied neither review.py nor tools/, so the
+review UI and merge_ckpt.py/repair.py never reached a Mac install at all. Both
+setup_mac.sh and update_mac.sh now carry them.
 
-The diagnosis was wrong. I read the low training counts (थांबलं appears twice in
-1.26 hours of transcripts) as "never learned it" and concluded the fix was more
-recordings. But IndicF5 was already trained on hundreds of hours of Marathi and
-knew these words. 80 epochs over 1.26 hours did not fail to teach them - it
-overwrote them. Catastrophic forgetting, and the signature fits exactly: voice
-correct, language degraded.
+README_MAC rewritten around the merged checkpoint. It previously told you to
+download model_last.pt from Kaggle, which is the model with the broken Marathi.
+The section now explains why the fine-tune mispronounces, names
+model_voice_merged50.pt as the file to copy, and gives a self-contained recipe
+for rebuilding the merge on the Mac - including the key detail that only
+_orig_mod. is stripped from the base while ema_model. is kept, which is what
+makes all 364 tensors line up.
 
-tools/merge_ckpt.py interpolates the weights back toward the base:
+Also refreshed: NFE guidance (32 is the default now, not 16), and the note that
+the review UI runs on 7861 and does not touch the GPU until you press Repair.
 
-    merged = alpha * finetuned + (1 - alpha) * base
-
-Speaker identity sits in a small low-rank part of the weights while general
-pronunciation is spread across all of them, so a partial blend keeps the voice
-and recovers the language. No training, no GPU, no new recordings.
-
-alpha 0.50 is the pick, listening verdict "all cha, la and kolhapur pronounce
-were on point" with the voice still "90% on point". Saved as
-model_voice_merged50.pt and now the default in run_queue.py and overnight.bat.
-0.70 and 0.85 still mispronounced; 0.30 lost too much voice.
-
-Converting the base for the merge: it ships as model.safetensors with keys
-prefixed ema_model._orig_mod. plus a bundled vocoder.*. Strip only _orig_mod.
-and drop the vocoder, KEEP ema_model. - then all 364 tensors match the
-fine-tune by name and shape. Stripping ema_model. as well gives zero matches,
-which is the first thing I tried.
-
-Also in this change: run_queue.py gains --cool-below / --cool-max-min to pause
-between stories, and --lock-seed to use one seed for every chunk rather than
-seed+i. overnight.bat runs the queue from a Windows Scheduled Task with no
-trigger, so it survives closing the terminal.
+pronunciation.json synced at 244 entries, including the अनन्या respellings.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
