@@ -365,17 +365,60 @@ def prepare_text(text, d, use_dict, auto, drop_directions=True, expand_nums=True
 _cache = {"key": None, "tts": None}
 
 
-def get_tts(ckpt, vocab, device):
-    key = (ckpt, vocab, device)
+def _cast(tts, fn):
+    for name in ("ema_model", "model", "vocoder"):
+        obj = getattr(tts, name, None)
+        if obj is not None and hasattr(obj, fn):
+            setattr(tts, name, getattr(obj, fn)())
+    return tts
+
+
+def half_is_safe(tts, device):
+    """Does this device produce real audio in half precision, or NaN?
+
+    On GTX 16-series cards it produces NaN, which libsndfile writes as a
+    constant -1.0 - a file of the right length that plays as silence. That is
+    where the blanket .float() came from. But it is a limitation of those
+    cards, not of the model: Apple Silicon and RTX cards run fp16 correctly and
+    roughly twice as fast, so forcing fp32 everywhere taxes them for a bug they
+    do not have. Rather than guess by device name, try it and look at the
+    numbers.
+    """
+    ref = next((r for r in list_refs() if ref_text_for(r)), None)
+    if ref is None:
+        return False
+    try:
+        _cast(tts, "half")
+        wav, _sr, _ = tts.infer(ref_file=ref, ref_text=ref_text_for(ref).strip(),
+                                gen_text="चाचणी.", nfe_step=8, remove_silence=False)
+        wav = np.asarray(wav, dtype=np.float32)
+        ok = wav.size > 0 and not np.isnan(wav).any() and float(np.abs(wav).max()) > 1e-4
+    except Exception:
+        ok = False
+    if not ok:
+        _cast(tts, "float")
+    return ok
+
+
+def get_tts(ckpt, vocab, device, precision="auto"):
+    """precision: 'auto' tests half once per device, 'fp32' forces full."""
+    key = (ckpt, vocab, device, precision)
     if _cache["key"] == key:
         return _cache["tts"]
     from f5_tts.api import F5TTS
     tts = F5TTS(model="F5TTS_Base", ckpt_file=ckpt, vocab_file=vocab, device=device)
-    # float16 makes this model emit NaN (flat DC = silence). Keep everything fp32.
-    for name in ("ema_model", "model", "vocoder"):
-        obj = getattr(tts, name, None)
-        if obj is not None and hasattr(obj, "float"):
-            setattr(tts, name, obj.float())
+    _cast(tts, "float")
+
+    want_half = precision == "half" or (
+        precision == "auto" and device in ("mps", "cuda")
+        and os.environ.get("MTTS_FORCE_FP32", "") != "1")
+    if want_half:
+        if half_is_safe(tts, device):
+            print(f"  precision: half on {device} (verified, no NaN)")
+        else:
+            print(f"  precision: float32 on {device} "
+                  f"(half produced NaN or silence - this is a GTX 16-series trait)")
+
     _cache.update(key=key, tts=tts)
     return tts
 
