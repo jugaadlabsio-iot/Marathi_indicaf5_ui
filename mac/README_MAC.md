@@ -95,6 +95,18 @@ or double-click `start_ui.command` in Finder, then open
 macOS may block it the first time ("unidentified developer") —
 **System Settings → Privacy & Security → Open Anyway**.
 
+### Batch rendering without the UI
+
+```bash
+bash ~/marathi_tts/overnight.sh detach   # survives closing the terminal
+bash ~/marathi_tts/progress.sh           # or 'progress.sh watch'
+pkill -f run_queue.py                    # stop it
+```
+
+`progress.sh` checks whether the runner is actually alive rather than trusting
+the log. On the PC a run once died silently with its last log line still reading
+"cooling before ..." — it looked healthy and had been dead for minutes.
+
 The review UI is a separate app on its own port — play a finished story, flag
 what sounds wrong, and it re-renders just those chunks:
 
@@ -149,6 +161,8 @@ review.py             listen, flag bad chunks, repair them (port 7861)
 tools/merge_ckpt.py   blend a fine-tune back toward its base model
 tools/repair.py       re-render individual chunks and rebuild a story
 run_queue.py          headless overnight batch runner
+overnight.sh          unattended render; 'detach' survives closing the terminal
+progress.sh           queue progress; checks the process is alive, not just the log
 setup_mac.sh          installer
 update_mac.sh         updater for an existing install
 start_ui.command      double-click launcher

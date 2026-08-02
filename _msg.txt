@@ -1,0 +1,25 @@
+Give the Mac the two operational scripts it never had
+
+A sanity check across the live Windows install, the repo, and what the Mac
+actually receives: all seven core modules and all eleven tools match
+byte-for-byte, and git is in sync. Two real gaps though, both platform-shaped.
+
+Batch rendering and progress monitoring existed only as overnight.bat,
+progress.bat and progress.ps1 - Windows-only. A Mac install had no way to run
+the queue unattended or to check on it.
+
+mac/overnight.sh and mac/progress.sh fill that in, and both installers now
+deliver them. progress.sh checks whether run_queue.py is actually alive rather
+than trusting the log, which is the check that caught a silent death on Windows
+where the last log line still read "cooling before ..." several minutes after
+the process had gone.
+
+overnight.sh deliberately has no GPU cooldown pause. That exists on Windows
+only because the GTX 1650 there idles near 79C and throttles within minutes;
+Apple Silicon does not behave that way.
+
+The root-level *.py scripts on Windows (align_ref, slim_ckpt, speak and the
+rest) are not a gap - they are duplicates of files the Mac already receives
+under tools/.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
