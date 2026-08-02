@@ -67,6 +67,9 @@ p.add_argument("--cool-below", type=int, default=0,
                     "so cooling between stories can cost less time than it saves")
 p.add_argument("--cool-max-min", type=int, default=25,
                help="give up waiting for the GPU after this many minutes")
+p.add_argument("--reverse", action="store_true",
+               help="work through the queue bottom-up, so a story you have "
+                    "not heard yet finishes first and can be judged early")
 p.add_argument("--lock-seed", action="store_true",
                help="use the SAME seed for every chunk instead of seed+i; "
                     "the probes did this and came out consistently clean")
@@ -159,6 +162,8 @@ pauses = {"chunk": a.pause, "sent": a.sent_pause, "line": a.line_pause,
 d = app.load_dict()
 
 jobs = app.list_queue()
+if a.reverse:
+    jobs = list(reversed(jobs))
 print("=" * 60)
 print(f"queue    : {len(jobs)} story(ies)")
 print(f"device   : {device}")
