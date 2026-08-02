@@ -564,6 +564,32 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
             out.append(cur)
         return out
 
+    def pack(parts):
+        """Fill each chunk up to max_secs instead of emitting one per clause.
+
+        Splitting a long sentence at every comma produced chunks like
+        '"चला,' and 'थंडगार,' - single words rendered as their own utterance,
+        each with sentence-final intonation and a pause after it. A list like
+        'थंडगार, स्वच्छ, गोड पाणी' came out as three detached fragments.
+
+        A comma is a weak boundary: worth using when a sentence is too long,
+        not worth honouring when the pieces would fit together anyway.
+        """
+        out, cur = [], ""
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            trial = (cur + " " + part).strip() if cur else part
+            if cur and secs(trial) > max_secs:
+                out.append(cur)
+                cur = part
+            else:
+                cur = trial
+        if cur:
+            out.append(cur)
+        return out
+
     def cut(text):
         if secs(text) <= max_secs:
             return [text]
@@ -576,6 +602,7 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
             if secs(sent) <= max_secs:
                 out.append(sent)
                 continue
+            pieces = []
             for part in _CLAUSE.split(sent):
                 part = part.strip()
                 if not part:
@@ -583,9 +610,10 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
                 # over the cap but nothing to split on: leave it intact, unless
                 # it is long enough that F5-TTS would split it for us
                 if secs(part) > hard_secs:
-                    out.extend(by_words(part))
+                    pieces.extend(by_words(part))
                 else:
-                    out.append(part)
+                    pieces.append(part)
+            out.extend(pack(pieces))
         return out or [text]
 
     def rejoin(pieces):
