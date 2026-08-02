@@ -59,8 +59,8 @@ for f in app.py translit.py numerals.py pacing.py run_queue.py review.py pronunc
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true
 # operational scripts: progress + unattended runner (Windows has .bat/.ps1)
-cp -v "$HERE/progress.sh" "$HERE/overnight.sh" "$HOME_DIR/" 2>/dev/null || true
-chmod +x "$HOME_DIR/progress.sh" "$HOME_DIR/overnight.sh" 2>/dev/null || true
+cp -v "$HERE/progress.sh" "$HERE/overnight.sh" "$HERE/stop_queue.sh" "$HOME_DIR/" 2>/dev/null || true
+chmod +x "$HOME_DIR/progress.sh" "$HOME_DIR/overnight.sh" "$HOME_DIR/stop_queue.sh" 2>/dev/null || true
 chmod +x "$HOME_DIR/start_ui.command" 2>/dev/null || true
 mkdir -p "$HOME_DIR/ref"
 cp -v "$ROOT"/ref/* "$HOME_DIR/ref/" 2>/dev/null || true

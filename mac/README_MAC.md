@@ -100,7 +100,8 @@ macOS may block it the first time ("unidentified developer") —
 ```bash
 bash ~/marathi_tts/overnight.sh detach   # survives closing the terminal
 bash ~/marathi_tts/progress.sh           # or 'progress.sh watch'
-pkill -f run_queue.py                    # stop it
+bash ~/marathi_tts/stop_queue.sh         # stop AFTER the current story
+pkill -f run_queue.py                    # stop immediately, losing that story
 ```
 
 `progress.sh` checks whether the runner is actually alive rather than trusting
@@ -162,6 +163,7 @@ tools/merge_ckpt.py   blend a fine-tune back toward its base model
 tools/repair.py       re-render individual chunks and rebuild a story
 run_queue.py          headless overnight batch runner
 overnight.sh          unattended render; 'detach' survives closing the terminal
+stop_queue.sh         graceful stop - finishes the story in flight, then exits
 progress.sh           queue progress; checks the process is alive, not just the log
 setup_mac.sh          installer
 update_mac.sh         updater for an existing install

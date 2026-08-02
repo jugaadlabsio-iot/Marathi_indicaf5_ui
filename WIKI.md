@@ -506,6 +506,19 @@ scattered error rate, which is what a damaged model looks like.
 right in one listening session and wrong in another; neighbouring items shift
 perception. Shuffle the order when auditioning.
 
+**Do not write a liveness check with a command that may not exist.** A
+graceful stop watcher called `pgrep -f run_queue.py`. `pgrep` is not in Git
+Bash on Windows; the missing command exited non-zero, the "has it died?" test
+read that as *yes*, and it killed a story at 73%. The replacement is a `STOP`
+file checked inside the runner between stories - `Path.exists()` cannot be
+misread, and the decision happens where it belongs.
+
+**Configure your own stdout.** `run_queue.py` inherited cp1252 on Windows and
+every story failed with `'charmap' codec can't encode characters`, which says
+nothing about the real cause. It only worked because `overnight.bat` happened
+to export `PYTHONIOENCODING`. Scripts that print Devanagari now call
+`sys.stdout.reconfigure(encoding='utf-8')` themselves.
+
 **Take the user's reframe seriously.** §9 exists because a stated assumption was
 challenged, and the challenge was correct.
 

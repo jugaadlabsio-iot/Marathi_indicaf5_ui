@@ -96,6 +96,12 @@ def chunk_at(tl, seconds):
 # could fail with nothing in the log. A json file next to the chunks is boring,
 # survives a page refresh, and can be read by the repair tool directly.
 import json
+import sys
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 
 def flags_path(run):

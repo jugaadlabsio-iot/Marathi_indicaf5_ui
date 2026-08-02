@@ -15,6 +15,15 @@ import sys
 import time
 from pathlib import Path
 
+# Windows consoles default to cp1252, which cannot encode Devanagari - every
+# story then dies with "'charmap' codec can't encode characters". Do not rely
+# on the caller exporting PYTHONIOENCODING.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("mtts_app", HERE / "app.py")
 app = importlib.util.module_from_spec(spec)
@@ -123,6 +132,27 @@ def cool_down(label=""):
             return
 
 
+STOP_FILE = app.QUEUE_DIR / "STOP"
+
+
+def stop_requested():
+    """Has someone asked for a graceful stop?
+
+    Checked between stories, never during one, so the story being rendered
+    always finishes. Dropping a file is the only mechanism that works from
+    another terminal, another machine over a share, or a script - and unlike
+    watching the log it cannot misread a missing command as a dead process.
+    """
+    return STOP_FILE.exists()
+
+
+def clear_stop():
+    try:
+        STOP_FILE.unlink()
+    except OSError:
+        pass
+
+
 device = app.DEVICE if a.device == "auto" else a.device
 pauses = {"chunk": a.pause, "sent": a.sent_pause, "line": a.line_pause,
           "para": a.para_pause, "end": 0}
@@ -138,6 +168,10 @@ print(f"NFE      : {a.nfe}")
 print("=" * 60, flush=True)
 if not jobs:
     sys.exit(0)
+if stop_requested():
+    print(f"{STOP_FILE} is present - nothing started. Delete it to run.", flush=True)
+    clear_stop()
+    sys.exit(0)
 
 t_all = time.time()
 ok = fail = 0
@@ -146,6 +180,11 @@ for i, name in enumerate(jobs, 1):
     if not src.exists():
         continue
     title = src.stem
+    if stop_requested():
+        print(f"\n  stop requested - finishing here, {len(jobs) - i + 1} "
+              f"story(ies) left in the queue", flush=True)
+        clear_stop()
+        break
     cool_down(f"before {title}")
     print(f"\n[{i}/{len(jobs)}] {title}", flush=True)
     try:
