@@ -381,6 +381,27 @@ def get_tts(ckpt, vocab, device):
 
 
 # -------------------------------------------------------------- chunking ---
+# A period does not always end a sentence. "डॉ. अनन्या कुलकर्णी." was split
+# after डॉ., so a story opened by saying "डॉ." on its own - heard as "do"
+# instead of the doctor's title running into her name. The period is hidden
+# behind a private-use character for the duration of chunking and put back
+# before anything is spoken, because python's re has no variable-length
+# lookbehind to express "not after an abbreviation".
+_ABBREVS = ["डॉ", "श्री", "श्रीमती", "सौ", "कु", "प्रा", "पं", "स्व", "ता",
+            "उदा", "वि", "मा", "अॅड", "इं",
+            "Dr", "Mr", "Mrs", "Ms", "Prof", "Sr", "Jr", "St", "No", "vs"]
+_ABBR_DOT = re.compile(r"(?<![\wऀ-ॿ])(" + "|".join(_ABBREVS) + r")\.")
+_ABBR_MARK = ""
+
+
+def protect_abbrevs(text):
+    return _ABBR_DOT.sub(lambda m: m.group(1) + _ABBR_MARK, text or "")
+
+
+def restore_abbrevs(text):
+    return (text or "").replace(_ABBR_MARK, ".")
+
+
 _SENT = re.compile(r"(?<=[।\.\?\!])\s+")
 
 
@@ -518,9 +539,26 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
                     out.append(part)
         return out or [text]
 
+    def rejoin(pieces):
+        """Glue anything too short back onto a neighbour.
+
+        split_sentences merges sentences under MIN_SENT_CHARS so F5-TTS is
+        never handed a tiny utterance, but cutting at full stops here undid
+        that: "डॉ. अनन्या कुलकर्णी. एम बी बी एस." came back apart as three
+        fragments, the first of them 0.4 seconds long.
+        """
+        out = []
+        for p in pieces:
+            if out and (len(out[-1]) < MIN_SENT_CHARS or len(p) < MIN_SENT_CHARS) \
+                    and secs(out[-1] + " " + p) <= max_secs * 1.25:
+                out[-1] = out[-1] + " " + p
+            else:
+                out.append(p)
+        return out
+
     grown = []
     for text, kind in items:
-        pieces = cut(text)
+        pieces = rejoin(cut(text))
         for i, p in enumerate(pieces):
             grown.append((p, "chunk" if i < len(pieces) - 1 else kind))
     return grown
@@ -662,7 +700,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
                seed=None, retry_short=True, max_secs=3.2,
-               lead_ms=350, tail_ms=900):
+               lead_ms=350, tail_ms=900, seed_per_chunk=True):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
@@ -677,7 +715,9 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             log(f"  chunk size {int(max_chars)} -> {cap} so every chunk renders "
                 f"in a single pass (avoids F5-TTS's internal seams)")
             max_chars = cap
-    items = split_blocks(text, int(max_chars), per_sentence=per_sentence)
+    # abbreviation periods are hidden for the whole of chunking, then restored
+    items = split_blocks(protect_abbrevs(text), int(max_chars),
+                         per_sentence=per_sentence)
     if not items:
         raise RuntimeError("Nothing to say.")
 
@@ -701,6 +741,10 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                 plan, rate = planned
         except Exception as e:
             log(f"  duration planning unavailable ({e}); using F5-TTS's estimate")
+
+    # put the abbreviation periods back before anything is spoken or indexed -
+    # unconditionally, so a failure above cannot leak the marker into the model
+    items = [(restore_abbrevs(c), k) for c, k in items]
 
     tts = get_tts(ckpt, vocab, device)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -734,7 +778,13 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                   cfg_strength=float(cfg), sway_sampling_coef=float(sway),
                   remove_silence=False)   # we trim ourselves, see trim_silence
         if seed is not None:
-            kw["seed"] = int(seed) + i     # reproducible, still varied per chunk
+            # seed_per_chunk offsets by the chunk number, so a run is
+            # reproducible while each chunk still starts from different noise.
+            # Turning it off uses the SAME seed for every chunk - which is what
+            # the probes did, and those came out consistently clean. If one
+            # seed happens to suit this voice and reference clip, there is no
+            # reason to keep rolling for a worse one.
+            kw["seed"] = int(seed) + i if seed_per_chunk else int(seed)
         want = plan[i - 1] if plan else None
         if want is not None:
             # fix_duration is the TOTAL canvas: reference + speech

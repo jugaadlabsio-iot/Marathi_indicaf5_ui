@@ -62,6 +62,43 @@ INFLECTED = [
     ("ळ     वळला",    "तो मागे वळला."),
     ("ळ     पळाला",   "तो पळाला."),
     ("ल     वळला/वलला", "तो वळला, तो वलला."),
+    # कोल्हापूर came out with a ळ: the ल्ह conjunct read as ळ. Same listening
+    # session, so try respellings that break the conjunct apart.
+    ("कोल्हापूर  as-is",  "तो कोल्हापूरला निघाला."),
+    ("कोल्हापूर  ZWNJ",   "तो कोल्‍हापूरला निघाला."),
+    ("कोल्हापूर  no halant", "तो कोलहापूरला निघाला."),
+    ("कोल्हापूर  spaced", "तो कोल हापूरला निघाला."),
+]
+
+# अनन्या comes out as "anya" - a whole syllable dropped - and does it every
+# time, in every story, which rules out seed luck. The name IS in the training
+# transcripts (66 occurrences across the scripts), so this is not a coverage
+# gap either; the नन् + या sequence is simply collapsing. These are respellings
+# that break that sequence apart in different ways.
+NAME = [
+    ("as-is",        "अनन्या खोलीत आली."),
+    ("no halant",    "अननया खोलीत आली."),
+    ("ZWNJ",         "अनन्‍या खोलीत आली."),
+    ("spaced",       "अनन या खोलीत आली."),
+    ("doubled न",    "अन्नन्या खोलीत आली."),
+    ("अ-नन्या",      "अ नन्या खोलीत आली."),
+    ("inflected as-is",  "अनन्याने दार उघडलं."),
+    ("inflected no halant", "अननयाने दार उघडलं."),
+    ("inflected ZWNJ",   "अनन्‍याने दार उघडलं."),
+]
+
+
+# The sentences that are actually failing in finished stories. Not invented
+# test cases - these are lifted from the scripts, with the reported word first.
+FAILING = [
+    ("thambla",   "पाटलांनी एक क्षण थांबलं."),
+    ("thambla 2", "तो दारात थांबलं आणि मागे बघितलं."),
+    ("library",   "ती लायब्ररीत बसायची."),
+    ("library 2", "शाळेच्या मागच्या बाजूला जुनी लायब्ररी होती."),
+    ("-lam 1",    "मला काही कळलं नाही."),
+    ("-lam 2",    "दार उघडलं आणि आत अंधार होता."),
+    ("-lam 3",    "त्याने मागे वळून बघितलं, पण कोणी नव्हतं."),
+    ("loanword",  "मोबाइलची बॅटरी संपली होती."),
 ]
 
 PROBES = [
@@ -102,6 +139,10 @@ def main():
                    help='e.g. "शाळा=शाळा,शाल्हा,शाला"')
     p.add_argument("--inflected", action="store_true",
                    help="probe the inflected ळ forms the stories actually use")
+    p.add_argument("--failing", action="store_true",
+                   help="the sentences that actually fail in finished stories")
+    p.add_argument("--name", action="store_true",
+                   help="probe respellings of अनन्या, which reads as anya")
     p.add_argument("--ckpt", default=None, help="one checkpoint instead of all")
     p.add_argument("--pace", type=float, default=1.2)
     p.add_argument("--device", default="auto")
@@ -134,6 +175,10 @@ def main():
         tag = "variants"
     elif a.inflected:
         items, tag = INFLECTED, "inflected"
+    elif a.name:
+        items, tag = NAME, "name"
+    elif a.failing:
+        items, tag = FAILING, "failing"
     else:
         items, tag = PROBES, "probe"
 

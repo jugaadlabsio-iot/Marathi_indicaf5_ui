@@ -51,6 +51,16 @@ p.add_argument("--seed", type=int, default=1097657232,
                help="fixed so a run is reproducible and a bad chunk can be "
                     "re-rendered deliberately; F5-TTS otherwise draws a fresh "
                     "random seed per chunk")
+p.add_argument("--cool-below", type=int, default=0,
+               help="between stories, wait until the GPU drops to this "
+                    "temperature. Sustained load pins the card at 90C where it "
+                    "thermally throttles; renders measured 22s cold and 65s hot, "
+                    "so cooling between stories can cost less time than it saves")
+p.add_argument("--cool-max-min", type=int, default=25,
+               help="give up waiting for the GPU after this many minutes")
+p.add_argument("--lock-seed", action="store_true",
+               help="use the SAME seed for every chunk instead of seed+i; "
+                    "the probes did this and came out consistently clean")
 p.add_argument("--lead", type=int, default=350, help="silence before the first word (ms)")
 p.add_argument("--tail", type=int, default=900, help="silence after the last word (ms)")
 p.add_argument("--max-secs", type=float, default=3.2,
@@ -61,7 +71,11 @@ a = p.parse_args()
 ckpts = app.list_ckpts()
 if not ckpts:
     sys.exit(f"No checkpoints in {app.MODELS_DIR}")
-ckpt = a.ckpt or next((c for c in ckpts if "slim" in c.lower()), ckpts[0])
+# The merged checkpoint is the default. The pure fine-tune had overwritten
+# the base model's Marathi - blending it half-way back recovered correct
+# pronunciation while keeping the voice recognisable.
+ckpt = a.ckpt or next((c for c in ckpts if "voice_merged" in c.lower()),
+                      next((c for c in ckpts if "slim" in c.lower()), ckpts[0]))
 
 refs = app.list_refs()
 if not refs:
@@ -74,6 +88,40 @@ else:                                  # shortest clip = fastest generation
 ref_txt = app.ref_text_for(ref)
 if not ref_txt:
     sys.exit(f"No transcript beside {ref} - create a matching .txt")
+
+def gpu_temp():
+    """Current GPU temperature, or None if nvidia-smi is not usable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15)
+        return int(out.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+def cool_down(label=""):
+    """Pause until the card is cool enough to run at full clocks."""
+    if a.cool_below <= 0:
+        return
+    t = gpu_temp()
+    if t is None or t <= a.cool_below:
+        return
+    print(f"\n  cooling {label}: GPU at {t}C, waiting for {a.cool_below}C "
+          f"(up to {a.cool_max_min} min)", flush=True)
+    start = time.time()
+    while True:
+        time.sleep(30)
+        t = gpu_temp()
+        mins = (time.time() - start) / 60
+        if t is None or t <= a.cool_below:
+            print(f"  cooled to {t}C after {mins:.0f} min", flush=True)
+            return
+        if mins >= a.cool_max_min:
+            print(f"  still {t}C after {mins:.0f} min, carrying on", flush=True)
+            return
+
 
 device = app.DEVICE if a.device == "auto" else a.device
 pauses = {"chunk": a.pause, "sent": a.sent_pause, "line": a.line_pause,
@@ -98,6 +146,7 @@ for i, name in enumerate(jobs, 1):
     if not src.exists():
         continue
     title = src.stem
+    cool_down(f"before {title}")
     print(f"\n[{i}/{len(jobs)}] {title}", flush=True)
     try:
         out_path, dur, took, n, _ = app.synthesize(
@@ -113,7 +162,8 @@ for i, name in enumerate(jobs, 1):
             one_pass=not a.allow_splits,
             pace=a.pace, fit_duration=not a.byte_duration,
             per_sentence=not a.no_sentence_split, seed=a.seed,
-            max_secs=a.max_secs, lead_ms=a.lead, tail_ms=a.tail)
+            max_secs=a.max_secs, lead_ms=a.lead, tail_ms=a.tail,
+            seed_per_chunk=not a.lock_seed)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1
