@@ -33,7 +33,7 @@ spec.loader.exec_module(app)
 
 PARTS = app.PARTS_DIR
 OUT = app.OUT_DIR
-DEFAULT_PAUSES = {"chunk": 250, "sent": 300, "line": 350, "para": 800, "end": 0}
+DEFAULT_PAUSES = {"chunk": 250, "flow": 60, "sent": 300, "line": 350, "para": 800, "end": 0}
 
 
 def list_runs():

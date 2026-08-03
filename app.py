@@ -565,23 +565,38 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
         return out
 
     def pack(parts):
-        """Fill each chunk up to max_secs instead of emitting one per clause.
+        """Group clauses into as few pieces as possible, of even length.
 
-        Splitting a long sentence at every comma produced chunks like
-        '"चला,' and 'थंडगार,' - single words rendered as their own utterance,
-        each with sentence-final intonation and a pause after it. A list like
-        'थंडगार, स्वच्छ, गोड पाणी' came out as three detached fragments.
+        Two problems this replaces.
 
-        A comma is a weak boundary: worth using when a sentence is too long,
-        not worth honouring when the pieces would fit together anyway.
+        Emitting one chunk per comma gave single-word utterances - '"चला,',
+        'थंडगार,' - each with sentence-final intonation and a pause after it.
+        A list like 'थंडगार, स्वच्छ, गोड पाणी' became three detached fragments.
+
+        Filling greedily to max_secs then left a runt at the end: a 9 s
+        sentence split 8 s + 1 s, and that 1 s tail is the "last word clubbed
+        with the next sentence". So decide how many pieces are needed, then
+        aim for even ones - two halves of 4.5 s read as one sentence taking a
+        breath, where 8 s + 1 s reads as a sentence plus an orphan.
         """
+        parts = [p.strip() for p in parts if p.strip()]
+        if not parts:
+            return []
+        total = secs(" ".join(parts))
+        if total <= max_secs:
+            return [" ".join(parts)]
+
+        import math
+        n = max(2, math.ceil(total / max_secs))
+        target = total / n                       # even, not full
+
         out, cur = [], ""
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
+        for i, part in enumerate(parts):
             trial = (cur + " " + part).strip() if cur else part
-            if cur and secs(trial) > max_secs:
+            remaining = len(parts) - i - 1
+            # start a new piece once this one is at its share, but never leave
+            # fewer clauses than pieces still to fill
+            if cur and secs(trial) > target and remaining >= (n - len(out) - 1):
                 out.append(cur)
                 cur = part
             else:
@@ -637,7 +652,15 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
     for text, kind in items:
         pieces = rejoin(cut(text))
         for i, p in enumerate(pieces):
-            grown.append((p, "chunk" if i < len(pieces) - 1 else kind))
+            if i == len(pieces) - 1:
+                grown.append((p, kind))
+                continue
+            # Only a sentence-ender is a stop. _CLAUSE splits AFTER the comma,
+            # so every mid-sentence piece ends with one - and counting a comma
+            # as "ends on punctuation" gave all of them the full 250ms stop,
+            # which is what made a split sentence sound like two sentences.
+            ends_sentence = re.search(r"[।\.\?\!…]\s*[\"'”’]?\s*$", p)
+            grown.append((p, "chunk" if ends_sentence else "flow"))
     return grown
 
 
@@ -967,7 +990,7 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              use_dict, dict_rows, auto_translit, device_choice,
              line_pause, para_pause, title, cfg, trim, drop_dir,
              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-             max_secs, lead_ms, tail_ms,
+             max_secs, lead_ms, tail_ms, flow_pause,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -979,7 +1002,7 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
         return None, "Reference transcript is empty - it must match the clip word for word."
 
     device = DEVICE if device_choice == "auto" else device_choice
-    pauses = {"chunk": int(pause_ms), "sent": int(sent_pause),
+    pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
               "line": int(line_pause), "para": int(para_pause), "end": 0}
     progress(0, desc=f"Loading model on {device}...")
     try:
@@ -1044,7 +1067,7 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               line_pause, para_pause, cfg=2.0, trim=True, drop_dir=True,
               expand_nums=True, one_pass=True, sent_pause=260, pace=1.0,
               fit_dur=True, per_sent=True, max_secs=3.2,
-              lead_ms=350, tail_ms=900,
+              lead_ms=350, tail_ms=900, flow_pause=60,
               progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
@@ -1055,7 +1078,7 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
         return queue_table(), "Pick a checkpoint, a reference clip and its transcript first."
 
     device = DEVICE if device_choice == "auto" else device_choice
-    pauses = {"chunk": int(pause_ms), "sent": int(sent_pause),
+    pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
               "line": int(line_pause), "para": int(para_pause), "end": 0}
     log_lines, t_all = [], time.time()
 
@@ -1249,6 +1272,13 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                     )
                     pause_ms = gr.Slider(0, 800, 150, step=25,
                                          label="Within a long line (ms)")
+                    flow_pause = gr.Slider(0, 400, 60, step=10,
+                                           label="Inside a split sentence (ms)",
+                                           info="When one sentence is too long "
+                                                "and gets divided, this is the "
+                                                "gap between its pieces. Small "
+                                                "on purpose - it should read as "
+                                                "a breath, not a full stop.")
                     sent_pause = gr.Slider(0, 1200, 260, step=20,
                                            label="At a full stop (ms)",
                                            info="Only applies with one-sentence-"
@@ -1397,7 +1427,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, title, cfg, trim, drop_dir,
               expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs, lead_ms, tail_ms],
+              max_secs, lead_ms, tail_ms, flow_pause],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -1408,7 +1438,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                  use_dict, dict_rows, auto_translit, device_choice,
                  line_pause, para_pause, cfg, trim, drop_dir,
                  expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs, lead_ms, tail_ms],
+              max_secs, lead_ms, tail_ms, flow_pause],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)

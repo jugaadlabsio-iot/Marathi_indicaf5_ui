@@ -47,6 +47,9 @@ p.add_argument("--keep-digits", action="store_true",
 p.add_argument("--allow-splits", action="store_true",
                help="let F5-TTS split long chunks itself (its seams cause slurring)")
 p.add_argument("--sent-pause", type=int, default=300, help="pause at a full stop (ms)")
+p.add_argument("--flow-pause", type=int, default=60,
+               help="pause between pieces of ONE sentence. Small on purpose: "
+                    "a split sentence should read as a breath, not a stop")
 p.add_argument("--pace", type=float, default=1.35,
                help="roominess. 1.35 is the tested default: the same sentence "
                     "on 10 random seeds was clean 4/10 at 1.0 and 9/10 here. "
@@ -157,7 +160,7 @@ def clear_stop():
 
 
 device = app.DEVICE if a.device == "auto" else a.device
-pauses = {"chunk": a.pause, "sent": a.sent_pause, "line": a.line_pause,
+pauses = {"chunk": a.pause, "flow": a.flow_pause, "sent": a.sent_pause, "line": a.line_pause,
           "para": a.para_pause, "end": 0}
 d = app.load_dict()
 
