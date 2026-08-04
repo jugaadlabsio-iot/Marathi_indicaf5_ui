@@ -70,6 +70,15 @@ p.add_argument("--cool-below", type=int, default=0,
                     "so cooling between stories can cost less time than it saves")
 p.add_argument("--cool-max-min", type=int, default=25,
                help="give up waiting for the GPU after this many minutes")
+p.add_argument("--no-chain", action="store_true",
+               help="do NOT condition each chunk on the previous one. Chaining is "
+                    "on by default: F5-TTS generates a CONTINUATION of whatever "
+                    "audio it is given, so feeding it the previous chunk carries "
+                    "intonation across the join instead of restarting it from the "
+                    "reference clip 200 times a story")
+p.add_argument("--chain-reanchor", type=int, default=6,
+               help="go back to the real reference clip every N chunks, and at "
+                    "every paragraph, so synthetic-on-synthetic drift stays bounded")
 p.add_argument("--reverse", action="store_true",
                help="work through the queue bottom-up, so a story you have "
                     "not heard yet finishes first and can be judged early")
@@ -210,7 +219,8 @@ for i, name in enumerate(jobs, 1):
             pace=a.pace, fit_duration=not a.byte_duration,
             per_sentence=not a.no_sentence_split, seed=a.seed,
             max_secs=a.max_secs, lead_ms=a.lead, tail_ms=a.tail,
-            seed_per_chunk=not a.lock_seed)
+            seed_per_chunk=not a.lock_seed,
+            chain=not a.no_chain, chain_reanchor=a.chain_reanchor)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1

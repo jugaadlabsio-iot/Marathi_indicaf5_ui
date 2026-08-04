@@ -800,7 +800,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
                seed=None, retry_short=True, max_secs=3.2,
-               lead_ms=350, tail_ms=900, seed_per_chunk=True):
+               lead_ms=350, tail_ms=900, seed_per_chunk=True,
+               chain=True, chain_reanchor=6):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
     if not Path(vocab).exists():
@@ -863,7 +864,44 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
     except Exception:
         pass
 
+    # --- prosody chaining ---------------------------------------------------
+    # F5-TTS builds `ref_text + gen_text` as ONE utterance and generates the
+    # whole thing conditioned on ref_audio, then slices the reference off. The
+    # output is therefore a CONTINUATION of whatever audio it was given.
+    #
+    # Handing it the same 5s clip for every chunk is what makes a story sound
+    # like 200 separate recordings: each chunk restarts the intonation from
+    # that clip. Feeding it the PREVIOUS chunk instead lets the contour carry
+    # across the join, which is the whole difference between a read-aloud list
+    # of sentences and continuous narration.
+    #
+    # Drift is the risk - each chunk conditions on synthetic audio, so error
+    # compounds. Re-anchoring to the real reference every `chain_reanchor`
+    # chunks, and at every paragraph, bounds it.
+    chain_dir = run_dir / "_chain"
+    if chain:
+        chain_dir.mkdir(exist_ok=True)
+    prev_wav, prev_text, since_anchor = None, None, 0
+
+    def reference_for(idx, kind_prev):
+        """(path, text, seconds) to condition this chunk on."""
+        nonlocal since_anchor
+        if (not chain or prev_wav is None or since_anchor >= chain_reanchor
+                or kind_prev in ("para", "line")):
+            since_anchor = 0
+            return ref_wav, ref_txt.strip(), ref_sec
+        p = chain_dir / f"prev_{idx:04d}.wav"
+        sf.write(p, prev_wav, sr)
+        try:
+            _, norm_t, secs_ = ref_profile(str(p), prev_text)
+        except Exception:
+            since_anchor = 0
+            return ref_wav, ref_txt.strip(), ref_sec
+        since_anchor += 1
+        return str(p), norm_t, secs_
+
     pieces, sr, t0 = [], 24000, time.time()
+    prev_kind = None
     for i, (chunk, kind) in enumerate(items, 1):
         done = i - 1
         if on_progress:
@@ -873,7 +911,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                 eta = f" · ~{per*(len(items)-done)/60:.1f} min left"
             on_progress(done / len(items), f"Chunk {i}/{len(items)}{eta}")
 
-        kw = dict(ref_file=ref_wav, ref_text=ref_txt.strip(),
+        cur_ref, cur_ref_txt, cur_ref_sec = reference_for(i, prev_kind)
+        kw = dict(ref_file=cur_ref, ref_text=cur_ref_txt.strip(),
                   speed=float(speed), nfe_step=int(nfe),
                   cfg_strength=float(cfg), sway_sampling_coef=float(sway),
                   remove_silence=False)   # we trim ourselves, see trim_silence
@@ -887,8 +926,9 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             kw["seed"] = int(seed) + i if seed_per_chunk else int(seed)
         want = plan[i - 1] if plan else None
         if want is not None:
-            # fix_duration is the TOTAL canvas: reference + speech
-            kw["fix_duration"] = ref_sec + want
+            # fix_duration is the TOTAL canvas: reference + speech, and the
+            # reference changes per chunk when chaining
+            kw["fix_duration"] = cur_ref_sec + want
         try:
             wav, sr, _ = tts.infer(gen_text=chunk, **kw)
         except torch.cuda.OutOfMemoryError:
@@ -918,7 +958,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                 # `want` already carries the roominess; stacking another 30%
                 # on top of a high pace setting lands in the babble zone, so
                 # the extra is small and the total stays under the ceiling
-                kw3["fix_duration"] = ref_sec + want * 1.12
+                kw3["fix_duration"] = cur_ref_sec + want * 1.12
                 w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
                 w3 = np.asarray(w3, dtype=np.float32)
                 if (not np.isnan(w3).any() and not ends_mid_word(w3, sr)
@@ -942,7 +982,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                 kw2 = dict(kw)
                 kw2["seed"] = (int(seed) + i if seed is not None
                                else random.randint(0, 2**31 - 1))
-                kw2["fix_duration"] = ref_sec + want * 1.06
+                kw2["fix_duration"] = cur_ref_sec + want * 1.06
                 w2, sr, _ = tts.infer(gen_text=chunk, **kw2)
                 w2 = np.asarray(w2, dtype=np.float32)
                 if not np.isnan(w2).any():
@@ -956,6 +996,22 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
         wav = fade_edges(wav, sr)         # no clicks where chunks meet
 
         sf.write(run_dir / f"{i:04d}.wav", wav, sr)   # never lose a long run
+        if chain:
+            # only chain from a take we believe in - conditioning the next
+            # chunk on a bad one propagates the damage
+            healthy = (wav.size > int(sr * 0.3) and not np.isnan(wav).any()
+                       and float(np.abs(wav).max()) > 1e-3)
+            prev_wav, prev_text = (wav, chunk) if healthy else (None, None)
+        prev_kind = kind
+        if chain and i % 25 == 0:
+            # preprocess_ref_audio_text caches by md5 and never evicts; with a
+            # fresh reference per chunk that grows without bound
+            try:
+                from f5_tts.infer import utils_infer as _ui
+                _ui._ref_audio_cache.clear()
+                _ui._ref_text_cache.clear()
+            except Exception:
+                pass
         pieces.append(wav)
         if device == "cuda":
             torch.cuda.empty_cache()
@@ -983,6 +1039,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
     base = f"{tag}_{stamp}" if tag else f"story_{stamp}"
     out_path = OUT_DIR / f"{base}.wav"
     sf.write(out_path, audio, sr)
+    if chain:
+        shutil.rmtree(run_dir / "_chain", ignore_errors=True)
     return out_path, len(audio) / sr, time.time() - t0, len(items), run_dir
 
 
