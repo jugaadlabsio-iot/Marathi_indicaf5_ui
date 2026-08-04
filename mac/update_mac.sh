@@ -25,7 +25,7 @@ fi
 
 echo
 echo "==> copying app files into $HOME_DIR"
-for f in app.py translit.py numerals.py pacing.py run_queue.py review.py; do
+for f in app.py translit.py numerals.py pacing.py warmth.py run_queue.py review.py; do
   [ -f "$ROOT/$f" ] && cp -v "$ROOT/$f" "$HOME_DIR/"
 done
 cp -v "$HERE/start_ui.command" "$HOME_DIR/" 2>/dev/null || true

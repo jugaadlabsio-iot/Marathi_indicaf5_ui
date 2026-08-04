@@ -79,6 +79,9 @@ p.add_argument("--no-chain", action="store_true",
 p.add_argument("--chain-reanchor", type=int, default=6,
                help="go back to the real reference clip every N chunks, and at "
                     "every paragraph, so synthetic-on-synthetic drift stays bounded")
+p.add_argument("--no-warmth", action="store_true",
+               help="skip the post-vocoder EQ and compression. On by default; "
+                    "the unprocessed mix is always kept as <name>_raw.wav")
 p.add_argument("--reverse", action="store_true",
                help="work through the queue bottom-up, so a story you have "
                     "not heard yet finishes first and can be judged early")
@@ -220,7 +223,8 @@ for i, name in enumerate(jobs, 1):
             per_sentence=not a.no_sentence_split, seed=a.seed,
             max_secs=a.max_secs, lead_ms=a.lead, tail_ms=a.tail,
             seed_per_chunk=not a.lock_seed,
-            chain=not a.no_chain, chain_reanchor=a.chain_reanchor)
+            chain=not a.no_chain, chain_reanchor=a.chain_reanchor,
+            apply_warmth=not a.no_warmth)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1
