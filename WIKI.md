@@ -5,8 +5,9 @@ Written as context for whoever picks this up next, including future-me.
 
 The short version: **most of the time went into problems that were not where
 they appeared to be.** Silent audio was a dtype bug. Rushed narration was a
-byte-count. Mispronunciation was catastrophic forgetting. Each looked like
-something else first.
+byte-count. Mispronunciation was catastrophic forgetting. Narration that sounded
+like 200 separate recordings was the pipeline resetting a continuation mechanism
+200 times. Each looked like something else first.
 
 ---
 
@@ -21,12 +22,14 @@ something else first.
 7. [Edges and clipping](#7-edges-and-clipping)
 8. [Seed variance](#8-seed-variance)
 9. [Catastrophic forgetting — the big one](#9-catastrophic-forgetting--the-big-one)
-10. [Gradio traps](#10-gradio-traps)
-11. [Hardware](#11-hardware)
-12. [Tools](#12-tools)
-13. [Settings that matter](#13-settings-that-matter)
-14. [Diagnostic method](#14-diagnostic-method)
-15. [Still open](#15-still-open)
+10. [Prosody chaining](#10-prosody-chaining)
+11. [Acoustic post-processing](#11-acoustic-post-processing)
+12. [Gradio traps](#12-gradio-traps)
+13. [Hardware](#13-hardware)
+14. [Tools](#14-tools)
+15. [Settings that matter](#15-settings-that-matter)
+16. [Diagnostic method](#16-diagnostic-method)
+17. [Still open](#17-still-open)
 
 ---
 
@@ -46,9 +49,11 @@ person's voice.
 The pipeline: script → text normalisation → chunking → per-chunk synthesis →
 concatenation with measured pauses → one wav per story.
 
-**Critically, F5-TTS synthesises each chunk independently from the reference
-clip.** It has no memory of the previous sentence. That single fact explains
-the ceiling on naturalness and most of the design decisions below.
+**F5-TTS synthesises each chunk as a continuation of whatever audio it is
+conditioned on.** Given the same fixed reference clip every time - which is what
+this pipeline did for a long while - each chunk restarts the prosody, and a
+story reads as a list of separately-recorded sentences. §10 is how that was
+fixed; it explains more of the design below than anything except §5.
 
 ---
 
@@ -365,7 +370,116 @@ data volume.
 
 ---
 
-## 10. Gradio traps
+## 10. Prosody chaining
+
+**The fix for "sounds like 200 separate recordings".**
+
+F5-TTS is an infilling model. It builds `ref_text + gen_text` as ONE utterance,
+generates the whole thing conditioned on `ref_audio`, then slices the reference
+portion off (`f5_tts/infer/utils_infer.py`):
+
+```python
+text_list = [ref_text + gen_text]
+generated = model_obj.sample(cond=audio, text=final_text_list, ...)
+generated = generated[:, ref_audio_len:, :]
+```
+
+So **the output is a continuation of whatever audio it is handed.** The pipeline
+was handing it the same 5-second clip for all 200 chunks of a story, which
+restarted the intonation, energy and tempo on every single one. The model has a
+continuation mechanism and we were resetting it 200 times.
+
+### Two versions, and why the first one failed
+
+**Pure chaining** — replace the reference with the previous chunk. Flow improved
+audibly. Voice fidelity did not survive it.
+
+The obvious theory was compounding drift, and it was **wrong**. Measured over a
+213-chunk story, distance from the reference by quarter:
+
+```
+CHAINED    0.012  0.015  0.015  0.016    drift +0.004
+UNCHAINED  0.009  0.013  0.015  0.015    drift +0.005
+```
+
+The unchained run wanders just as much. Re-anchoring already stopped the
+runaway. What chaining actually did was sit **consistently further out** — mean
+0.015 against 0.013, worst 0.049 against 0.041. Not a voice sliding away; a
+voice that is subtly not yours from the first chunk and never recovers.
+
+(The first `drift_limit` was set at 0.06 on that wrong theory — above the 0.050
+worst chunk ever observed, so it could never have fired. Dead code, shipped
+confidently.)
+
+**Anchored chaining** — concatenate instead of replacing:
+
+```
+reference = [the real clip] + [0.12s gap] + [previous chunk]
+text      = [reference text] + [previous chunk text]
+```
+
+Genuine human audio stays in the conditioning window, so timbre is anchored to
+a real recording while the previous chunk still supplies the prosodic run-up.
+The real clip goes **first** because F5-TTS trims an over-long reference by
+accumulating from the start — anything lost is the synthetic tail, never the
+anchor. If the previous chunk will not fit under the 12 s ceiling, it falls back
+to the plain reference rather than risking it.
+
+Measured on the same passage, same seed:
+
+| | voice-distance from reference |
+|---|---|
+| no chaining | 0.0116 |
+| pure chaining | **0.0123** |
+| **anchored** | **0.0115** |
+
+Anchored matches unchained fidelity while still chaining.
+
+### Guards
+
+- re-anchor every `chain_reanchor` chunks (4 in `app.py`, 6 from `run_queue.py`),
+  and at every paragraph and line
+- re-anchor on any chunk whose fingerprint lands beyond `drift_limit` (0.045),
+  set just above the 0.041 unchained generation reaches naturally so normal
+  variation does not trip it
+- never chain from a take that came back NaN, silent or implausibly short
+- clear F5-TTS's reference cache periodically — it keys on md5 and never
+  evicts, and chaining hands it a new file every chunk
+
+`--no-chain` disables it. `_chain/prev_NNNN.wav` is written only when a chunk
+actually chains, so that folder is the evidence it is working; it is deleted
+once the story is assembled.
+
+---
+
+## 11. Acoustic post-processing
+
+Vocos decodes accurate speech that is also **dry and thin** — flat low end, a
+brittle top, and volume that jumps between a whispered line and a shouted one.
+Commercial systems put a mastering chain after the vocoder. `warmth.py` is that
+chain, kept gentle:
+
+| stage | what | why |
+|---|---|---|
+| warmth | +2.5 dB low shelf at 200 Hz | chest resonance |
+| de-harsh | 2nd-order roll-off from 11 kHz | diffusion hiss and sibilance |
+| compress | 2:1 soft-knee | quiet and loud lines sit closer |
+
+The roll-off is deliberately **gentle**. A 4th-order brick wall reads as
+muffled; a 2nd-order slope takes the edge off and leaves air.
+
+It runs at the end of every render and **always writes the unprocessed mix
+alongside** as `<name>_raw.wav`, so it is reversible and an A/B never needs a
+re-render. `--no-warmth` skips it, and a failure in the DSP logs and passes the
+raw audio through rather than costing a story.
+
+The module lives at the project root because the pipeline uses it;
+`tools/warmth.py` is a thin CLI over the same code, so the two cannot drift
+apart.
+
+---
+
+## 12. Gradio traps
 
 Building the review UI cost four rounds, three of them avoidable.
 
@@ -400,7 +514,7 @@ Gradio 6 returns a pandas DataFrame from `gr.Dataframe`; `col_count` is now
 
 ---
 
-## 11. Hardware
+## 13. Hardware
 
 The GTX 1650 in this machine **idles at 79 °C** and throttles within minutes of
 load. Normal idle for that card is 35–45 °C.
@@ -428,7 +542,7 @@ Other hardware notes:
 
 ---
 
-## 12. Tools
+## 14. Tools
 
 | tool | what it answers |
 |---|---|
@@ -455,7 +569,7 @@ three word pairs. Listening is the better instrument at this scale.
 
 ---
 
-## 13. Settings that matter
+## 15. Settings that matter
 
 Defaults, and why.
 
@@ -472,13 +586,18 @@ Defaults, and why.
 | full stop | 300 ms · line 350 · paragraph 800 | |
 | lead / trail | **350 / 900 ms** | §7 |
 | reference clip | **5–6 s** | every chunk re-synthesises it; a 9 s clip drops the single-pass cap from ~160 to ~118 chars |
+| **chaining** | **anchored, on** | §10 — the fix for prosody restarting every chunk |
+| chain re-anchor | 6 chunks · every paragraph · drift > 0.045 | bounds the fidelity cost |
+| **warmth** | **on**, raw kept alongside | §11 |
+| flow pause | **60 ms** | inside a split sentence. A comma is a breath, not a stop — 250 ms there made one sentence sound like two |
+| max seconds per chunk | **8.0** | at 3.2, **26%** of chunks were comma-fragments |
 
 **Reference clip transcripts must match word for word.** This affects quality
 more than almost any other setting.
 
 ---
 
-## 14. Diagnostic method
+## 16. Diagnostic method
 
 What actually worked, and what wasted time.
 
@@ -524,13 +643,18 @@ challenged, and the challenge was correct.
 
 ---
 
-## 15. Still open
+## 17. Still open
 
-**Naturalness has a structural ceiling.** Each chunk is synthesised
-independently from the reference clip, so there is no intonation carried across
-sentences — no question-answer contour, no paragraph arc. Two hundred restarts
-in a ten-minute story reads as flat regardless of per-chunk quality. No setting
-addresses this; it is what chunked synthesis is.
+**Naturalness.** Prosody chaining (§10) addressed the worst of this — a chunk
+now continues the previous one rather than restarting from a fixed clip. What
+remains is that chaining is bounded: it re-anchors every few chunks and at every
+paragraph, so a contour still cannot span a whole page. Long-range structure is
+beyond what a 22-second conditioning window can hold.
+
+**Anchored chaining is validated at short length, not long.** The three-way
+measurement (0.0116 / 0.0123 / 0.0115) was on a 6-chunk passage where the gap
+between chained and unchained was only 0.0007. A 213-chunk story is where a
+residual offset would actually become audible. Directionally right, not proven.
 
 **Residual error rate.** Even merged and well-paced, a small fraction of chunks
 land badly. `review.py` + `repair.py` exist to catch those by ear rather than

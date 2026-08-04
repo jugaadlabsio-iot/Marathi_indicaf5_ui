@@ -49,6 +49,8 @@ Built for a specific job: producing long-form Marathi horror-story narration (�
 - **Stage directions skipped** — `[वातावरणनिर्मिती ...]` and `*[सूचना: ...]*` cues are stripped, not narrated.
 - **Numbers read as Marathi words** — `३०४ → तीनशे चार`, `1994 → एकोणीसशे चौऱ्याण्णव`, `2019 → दोन हजार एकोणीस`, `MH 09 BT → एम एच शून्य नऊ बी टी`, `११:४५ → अकरा पंचेचाळीस`. Digits are barely present in the training data, so left alone they come out wrong or get skipped.
 - **Syllable-based pacing** — speech time is budgeted from real Devanagari syllables rather than F5-TTS's UTF-8 byte count, which under-allots plain text by more than half. This is the fix for rushed delivery, sentences running together, clipped final words, and words going missing.
+- **Prosody chaining** — each chunk is generated as a *continuation* of the previous one, not restarted from a fixed reference clip. F5-TTS is an infilling model, so this uses the mechanism it already has; conditioning on the same 5-second clip 200 times is what made a story read as 200 separate recordings. Anchored, so your real voice stays in the conditioning window and fidelity is not traded for flow.
+- **Acoustic post-processing** — low-shelf warmth, a gentle high roll-off and 2:1 compression after the vocoder, because Vocos decodes accurate speech that is also dry and thin. The unprocessed mix is always kept alongside as `_raw.wav`.
 - **Single-pass chunking** — chunk size is capped to what F5-TTS can render in one forward pass, so it never splits and cross-fades behind your back. This is the fix for broken sentences and slurred words.
 - **Layout-driven pacing** — your line breaks and blank lines become real pauses, each join fade-matched so it cannot click.
 - **Reference clip manager** — record or upload clips per mood (calm, tense, dialogue) with their transcripts; switching clips is the main control over delivery.
@@ -150,9 +152,44 @@ Full reasoning and evidence: [WIKI.md §9](WIKI.md#9-catastrophic-forgetting--th
 | **Read numbers as words** | on | ३०४ → तीनशे चार · 1994 → एकोणीसशे चौऱ्याण्णव · 09 → शून्य नऊ · ११:४५ → अकरा पंचेचाळीस |
 | **Single-pass chunks** | on | See below |
 | **Budget duration by syllables** | on | See below — this is the fix for rushing and dropped words |
-| **Roominess** | 0.85 – 1.35 | Extra time on top of the estimate. Raise if delivery is hurried, lower if lines drawl |
+| **Roominess** | 0.85 – 1.35 | Extra time on top of the estimate. 1.35 is measured: the same sentence on 10 random seeds was clean 4/10 at 1.0 and 9/10 here |
 | **One sentence per chunk** | on | Each sentence gets its own start, end and pause instead of running together |
+| **Max seconds per chunk** | 8.0 | At 3.2, **26%** of chunks were comma-fragments — pieces of sentences rendered as standalone utterances |
+| **Prosody chaining** | anchored, on | See below |
+| **Warmth** | on | Post-vocoder EQ + compression; `_raw.wav` kept alongside |
+| Pause inside a split sentence | 60 ms | A comma is a breath, not a stop. 250 ms there made one sentence sound like two |
 | `sway_sampling_coef` | −1 | Fixed |
+
+### Prosody chaining — the fix for "sounds like separate recordings"
+
+F5-TTS is an **infilling** model. It builds `ref_text + gen_text` as one
+utterance, generates it conditioned on `ref_audio`, then slices the reference
+off — so the output is a **continuation of whatever audio it is handed**.
+
+Handing it the same 5-second clip for all 200 chunks of a story restarts the
+intonation, energy and tempo every single time. The model has a continuation
+mechanism; the naive pipeline resets it on every chunk.
+
+Chaining conditions each chunk on the previous one. **Anchored** chaining
+concatenates rather than replaces:
+
+```
+reference = [your real clip] + [previous chunk]
+```
+
+so genuine human audio stays in the conditioning window. Measured on one
+passage, same seed:
+
+| | voice-distance from your reference |
+|---|---|
+| no chaining | 0.0116 |
+| pure chaining | 0.0123 |
+| **anchored** | **0.0115** |
+
+Anchored keeps unchained fidelity while still carrying prosody across joins.
+Re-anchors every few chunks (6 from the batch runner, 4 from the library
+default), at every paragraph, and on any chunk that drifts past 0.045.
+`--no-chain` disables it; `--chain-reanchor N` tunes it.
 
 ### Syllable-based duration — the fix for rushing and dropped words
 
