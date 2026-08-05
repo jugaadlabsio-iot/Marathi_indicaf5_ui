@@ -33,7 +33,10 @@ spec.loader.exec_module(app)
 
 PARTS = app.PARTS_DIR
 OUT = app.OUT_DIR
-DEFAULT_PAUSES = {"chunk": 250, "flow": 60, "sent": 300, "line": 350, "para": 800, "end": 0}
+# Must match run_queue.py's defaults or the reconstructed timeline drifts
+# and every flagged position lands on the wrong chunk.
+DEFAULT_PAUSES = {"chunk": 250, "flow": 60, "sent": 300, "line": 350,
+                  "spara": 320, "para": 600, "end": 0}
 
 
 def list_runs():

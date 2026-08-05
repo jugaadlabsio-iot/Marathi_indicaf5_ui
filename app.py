@@ -668,21 +668,52 @@ def split_by_duration(items, rate, max_secs, roominess=1.08, hard_secs=9.0):
     return grown
 
 
-def split_blocks(text, max_chars=400, per_sentence=True):
+SHORT_PARA_CHARS = 140
+_DIALOGUE_OPEN = ('"', '“', "'", '‘', '—', '-')
+
+
+def split_blocks(text, max_chars=400, per_sentence=True,
+                 short_para_chars=SHORT_PARA_CHARS):
     """Split while RESPECTING your line breaks.
 
     Collapsing all whitespace destroyed exactly the pauses you wrote into the
     script, which is why lines ran together. Each returned item is
     (chunk_text, pause_kind) where pause_kind says how much silence follows:
     'chunk' = mid-sentence, 'sent' = a full stop, 'line' = you pressed Enter,
-    'para'  = you left a blank line.
+    'spara' = a SHORT blank-line block, 'para' = a substantial one.
+
+    'spara' exists because these scripts write dialogue one exchange per
+    paragraph:
+
+        आजी म्हणायची - "त्या झाडावर मुंज्या राहतो."
+        <blank>
+        "मुंज्या म्हणजे काय, आजी?"
+        <blank>
+        "एक मुलगा. तुझ्याच वयाचा."
+
+    Treating those blank lines as scene changes put a 800ms dead stop between
+    every line of a rapid back-and-forth. Measured across six stories, the
+    proportion of blank-line breaks tracks perceived choppiness almost exactly
+    (83 chars/paragraph in the worst, 174 in the best). A one-line reply is not
+    a scene change and must not be read as one.
     """
     items = []
+    para_start = 0
+
+    def close_para():
+        """Mark the break that just ended a paragraph, sized to the paragraph."""
+        nonlocal para_start
+        if not items or para_start >= len(items):
+            return                              # consecutive blank lines
+        ptext = " ".join(c for c, _ in items[para_start:]).strip()
+        dialogue = ptext.startswith(_DIALOGUE_OPEN)
+        items[-1][1] = "spara" if (len(ptext) <= short_para_chars or dialogue) else "para"
+        para_start = len(items)
+
     for raw in (text or "").split("\n"):
         s = raw.strip()
         if not s:                                  # blank line -> longer pause
-            if items:
-                items[-1][1] = "para"
+            close_para()
             continue
         if per_sentence:
             parts = split_sentences(s, max_chars)
@@ -805,7 +836,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                pace=1.0, fit_duration=True, per_sentence=True,
                seed=None, retry_short=True, max_secs=3.2,
                lead_ms=350, tail_ms=900, seed_per_chunk=True,
-               chain=True, chain_reanchor=4, drift_limit=0.045,
+               chain=True, chain_reanchor=8, drift_limit=0.045,
+               chain_across_paragraphs=True,
                chain_anchored=True, apply_warmth=True):
     """Core generation. Shared by the UI and the overnight queue runner."""
     vocab = str(MODELS_DIR / "vocab.txt")
@@ -934,8 +966,21 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
     def reference_for(idx, kind_prev):
         """(path, text, seconds) to condition this chunk on."""
         nonlocal since_anchor
+        # A paragraph break used to force a re-anchor here. It must not.
+        #
+        # Pause length and prosody reset are unrelated concerns that were
+        # conflated: a narrator pauses at a paragraph, they do not reset their
+        # voice. Because these scripts are written one short paragraph per
+        # line - dialogue especially - that rule fired constantly and chaining
+        # only engaged on 45-70% of chunks, tracking perceived quality almost
+        # exactly (the story rated best chained 65%, the two complained about
+        # chained 45%). The `since_anchor >= chain_reanchor` counter it was
+        # meant to back up almost never fired at all: 0-5 times in a whole
+        # story. Drift is bounded by the anchor being genuine audio, not by
+        # resetting at punctuation - see the +0.004 vs +0.005 measurement.
         if (not chain or prev_wav is None or since_anchor >= chain_reanchor
-                or kind_prev in ("para", "line")):
+                or (not chain_across_paragraphs
+                    and kind_prev in ("para", "spara", "line"))):
             since_anchor = 0
             return ref_wav, ref_txt.strip(), ref_sec
         p = chain_dir / f"prev_{idx:04d}.wav"
@@ -1158,9 +1203,14 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
     if not (ref_txt or "").strip():
         return None, "Reference transcript is empty - it must match the clip word for word."
 
+    # A short paragraph or a line of dialogue gets a fraction of the full
+    # paragraph pause - see split_blocks(). run_queue.py exposes this as
+    # --spara-pause; here it tracks the paragraph slider.
+    spara_pause = max(240, int(int(para_pause) * 0.55))
     device = DEVICE if device_choice == "auto" else device_choice
     pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
-              "line": int(line_pause), "para": int(para_pause), "end": 0}
+              "line": int(line_pause), "spara": int(spara_pause),
+              "para": int(para_pause), "end": 0}
     progress(0, desc=f"Loading model on {device}...")
     try:
         out_path, dur, took, n, run_dir = synthesize(
@@ -1234,9 +1284,14 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
     if not ckpt or not ref_wav or not (ref_txt or "").strip():
         return queue_table(), "Pick a checkpoint, a reference clip and its transcript first."
 
+    # A short paragraph or a line of dialogue gets a fraction of the full
+    # paragraph pause - see split_blocks(). run_queue.py exposes this as
+    # --spara-pause; here it tracks the paragraph slider.
+    spara_pause = max(240, int(int(para_pause) * 0.55))
     device = DEVICE if device_choice == "auto" else device_choice
     pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
-              "line": int(line_pause), "para": int(para_pause), "end": 0}
+              "line": int(line_pause), "spara": int(spara_pause),
+              "para": int(para_pause), "end": 0}
     log_lines, t_all = [], time.time()
 
     for j, name in enumerate(jobs, 1):
@@ -1445,8 +1500,11 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                                                 "chooses not to.")
                     line_pause = gr.Slider(0, 1500, 350, step=50,
                                            label="At a line break (ms)")
-                    para_pause = gr.Slider(0, 3000, 800, step=100,
-                                           label="At a blank line / paragraph (ms)")
+                    para_pause = gr.Slider(0, 3000, 600, step=100,
+                                           label="At a blank line / paragraph (ms)",
+                                           info="Short paragraphs and dialogue lines "
+                                                "automatically get ~55% of this - they "
+                                                "are line breaks, not scene changes")
                     lead_ms = gr.Slider(0, 2000, 350, step=50,
                                         label="Silence before the first word (ms)")
                     tail_ms = gr.Slider(0, 3000, 900, step=50,

@@ -37,7 +37,13 @@ p.add_argument("--speed", type=float, default=1.0)
 p.add_argument("--max-chars", type=int, default=400)
 p.add_argument("--pause", type=int, default=250)
 p.add_argument("--line-pause", type=int, default=350)
-p.add_argument("--para-pause", type=int, default=800)
+p.add_argument("--para-pause", type=int, default=600,
+               help="pause at a blank line ending a SUBSTANTIAL paragraph")
+p.add_argument("--spara-pause", type=int, default=320,
+               help="pause at a blank line ending a short paragraph or a "
+                    "line of dialogue. These scripts put every spoken line "
+                    "in its own paragraph; at 800ms a rapid exchange read "
+                    "as unrelated statements")
 p.add_argument("--device", default="auto")
 p.add_argument("--cfg", type=float, default=2.0, help="CFG strength (2.0 balanced)")
 p.add_argument("--no-trim", action="store_true", help="keep the model's own head/tail silence")
@@ -76,9 +82,14 @@ p.add_argument("--no-chain", action="store_true",
                     "audio it is given, so feeding it the previous chunk carries "
                     "intonation across the join instead of restarting it from the "
                     "reference clip 200 times a story")
-p.add_argument("--chain-reanchor", type=int, default=6,
+p.add_argument("--chain-reanchor", type=int, default=8,
                help="go back to the real reference clip every N chunks, and at "
                     "every paragraph, so synthetic-on-synthetic drift stays bounded")
+p.add_argument("--break-chain-at-paragraphs", action="store_true",
+               help="restore the old behaviour: re-anchor at every blank "
+                    "line. That made chaining engage on only 44-70%% of "
+                    "chunks depending on how the author formatted "
+                    "paragraphs, and tracked perceived choppiness exactly")
 p.add_argument("--no-warmth", action="store_true",
                help="skip the post-vocoder EQ and compression. On by default; "
                     "the unprocessed mix is always kept as <name>_raw.wav")
@@ -173,7 +184,7 @@ def clear_stop():
 
 device = app.DEVICE if a.device == "auto" else a.device
 pauses = {"chunk": a.pause, "flow": a.flow_pause, "sent": a.sent_pause, "line": a.line_pause,
-          "para": a.para_pause, "end": 0}
+          "spara": a.spara_pause, "para": a.para_pause, "end": 0}
 d = app.load_dict()
 
 jobs = app.list_queue()
@@ -224,6 +235,7 @@ for i, name in enumerate(jobs, 1):
             max_secs=a.max_secs, lead_ms=a.lead, tail_ms=a.tail,
             seed_per_chunk=not a.lock_seed,
             chain=not a.no_chain, chain_reanchor=a.chain_reanchor,
+            chain_across_paragraphs=not a.break_chain_at_paragraphs,
             apply_warmth=not a.no_warmth)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
