@@ -105,9 +105,9 @@ d = app.load_dict()
 pauses = {"chunk": 250, "flow": 60, "sent": 300, "line": 350,
           "spara": 320, "para": 600, "end": 0}
 
-todo = [("1_current_9.57", REF / "ref_short.wav"),
-        ("2_mid_6.07", REF / "ref_calm_mid.wav"),
-        ("3_calm_5.38", REF / "ref_calm_short.wav")]
+todo = [("A_ref_short_9.57", REF / "ref_short.wav"),
+        ("B_nat3_8.53", REF / "ref_nat3.wav"),
+        ("C_nat1_8.01", REF / "ref_nat1.wav")]
 
 print("\nRendering the same passage with each reference - tempo is the only change.\n")
 for name, refwav in todo:

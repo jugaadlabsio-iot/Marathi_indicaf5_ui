@@ -1008,10 +1008,11 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
         except Exception:
             ref_fp = None
     drifted = 0
+    chained_n = 0            # durable evidence chaining actually engaged
 
     def reference_for(idx, kind_prev):
         """(path, text, seconds) to condition this chunk on."""
-        nonlocal since_anchor
+        nonlocal since_anchor, chained_n
         # A paragraph break used to force a re-anchor here. It must not.
         #
         # Pause length and prosody reset are unrelated concerns that were
@@ -1056,6 +1057,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                     joined = ref_txt.strip().rstrip(".") + ". " + prev_text
                     _, norm_t, secs_ = ref_profile(str(p), joined)
                     since_anchor += 1
+                    chained_n += 1
                     return str(p), norm_t, secs_
                 except Exception:
                     pass
@@ -1069,6 +1071,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             since_anchor = 0
             return ref_wav, ref_txt.strip(), ref_sec
         since_anchor += 1
+        chained_n += 1
         return str(p), norm_t, secs_
 
     pieces, sr, t0 = [], 24000, time.time()
@@ -1229,7 +1232,42 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
         except Exception as e:
             log(f"  warmth skipped ({e})")
     sf.write(out_path, audio, sr)
+
+    # A durable record of what this render ACTUALLY used. _chain/ is deleted
+    # below, so without this there is no way afterwards to tell whether
+    # chaining engaged, whether duration budgeting applied, or which reference
+    # produced a given wav - and this session lost hours to renders that were
+    # silently degraded in exactly those ways.
+    try:
+        planned_ok = bool(plan) and all(x > 0 for x in plan)
+        (run_dir / "run_info.txt").write_text(
+            f"output        {out_path.name}\n"
+            f"model         {Path(ckpt).name}\n"
+            f"reference     {Path(ref_wav).name}  "
+            f"({ref_sec:.2f}s, {rate:.2f} moras/sec)\n"
+            f"chunks        {len(items)}\n"
+            f"CHAINED       {chained_n} of {len(items)} "
+            f"({chained_n * 100 // max(len(items), 1)}%)"
+            f"{'' if chain else '   [chaining OFF]'}\n"
+            f"  reanchor    every {chain_reanchor}, anchored={chain_anchored}, "
+            f"across_paragraphs={chain_across_paragraphs}, drift_limit={drift_limit}\n"
+            f"  drifted     {drifted}\n"
+            f"DURATION      "
+            f"{'budgeted per chunk' if planned_ok else '*** UNPACED - byte-count fallback ***'}\n"
+            f"nfe           {nfe}\n"
+            f"cfg           {cfg}\n"
+            f"roominess     {pace}\n"
+            f"max_secs      {max_secs}\n"
+            f"seed          {seed}  (per_chunk={seed_per_chunk})\n"
+            f"pauses        {pauses}\n"
+            f"warmth        {bool(apply_warmth and warmth)}\n"
+            f"lead/tail ms  {lead_ms}/{tail_ms}\n",
+            encoding="utf-8")
+    except Exception:
+        pass
     if chain:
+        log(f"  chained {chained_n} of {len(items)} chunks "
+            f"({chained_n * 100 // max(len(items), 1)}%)")
         shutil.rmtree(run_dir / "_chain", ignore_errors=True)
     return out_path, len(audio) / sr, time.time() - t0, len(items), run_dir
 
@@ -1239,6 +1277,9 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              line_pause, para_pause, title, cfg, trim, drop_dir,
              expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
              max_secs, lead_ms, tail_ms, flow_pause,
+             spara_pause=320, chain=True, chain_across_para=True,
+             chain_reanchor=8, drift_limit=0.045, apply_warmth=True,
+             seed_num=7, lock_seed=True,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -1249,10 +1290,6 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
     if not (ref_txt or "").strip():
         return None, "Reference transcript is empty - it must match the clip word for word."
 
-    # A short paragraph or a line of dialogue gets a fraction of the full
-    # paragraph pause - see split_blocks(). run_queue.py exposes this as
-    # --spara-pause; here it tracks the paragraph slider.
-    spara_pause = max(240, int(int(para_pause) * 0.55))
     device = DEVICE if device_choice == "auto" else device_choice
     pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
               "line": int(line_pause), "spara": int(spara_pause),
@@ -1266,7 +1303,12 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             cfg=cfg, trim=trim, drop_directions=drop_dir,
             expand_nums=expand_nums, one_pass=one_pass,
             pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
-            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms)
+            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms,
+            seed=int(seed_num) if seed_num is not None else None,
+            seed_per_chunk=not lock_seed,
+            chain=chain, chain_reanchor=int(chain_reanchor),
+            chain_across_paragraphs=chain_across_para,
+            drift_limit=float(drift_limit), apply_warmth=apply_warmth)
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -1321,6 +1363,9 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               expand_nums=True, one_pass=True, sent_pause=260, pace=1.0,
               fit_dur=True, per_sent=True, max_secs=3.2,
               lead_ms=350, tail_ms=900, flow_pause=60,
+              spara_pause=320, chain=True, chain_across_para=True,
+              chain_reanchor=8, drift_limit=0.045, apply_warmth=True,
+              seed_num=7, lock_seed=True,
               progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
@@ -1330,10 +1375,6 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
     if not ckpt or not ref_wav or not (ref_txt or "").strip():
         return queue_table(), "Pick a checkpoint, a reference clip and its transcript first."
 
-    # A short paragraph or a line of dialogue gets a fraction of the full
-    # paragraph pause - see split_blocks(). run_queue.py exposes this as
-    # --spara-pause; here it tracks the paragraph slider.
-    spara_pause = max(240, int(int(para_pause) * 0.55))
     device = DEVICE if device_choice == "auto" else device_choice
     pauses = {"chunk": int(pause_ms), "flow": int(flow_pause), "sent": int(sent_pause),
               "line": int(line_pause), "spara": int(spara_pause),
@@ -1358,7 +1399,12 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
                 cfg=cfg, trim=trim, drop_directions=drop_dir,
                 expand_nums=expand_nums, one_pass=one_pass,
                 pace=pace, fit_duration=fit_dur, per_sentence=per_sent,
-            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms)
+            max_secs=max_secs, lead_ms=lead_ms, tail_ms=tail_ms,
+            seed=int(seed_num) if seed_num is not None else None,
+            seed_per_chunk=not lock_seed,
+            chain=chain, chain_reanchor=int(chain_reanchor),
+            chain_across_paragraphs=chain_across_para,
+            drift_limit=float(drift_limit), apply_warmth=apply_warmth)
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -1561,11 +1607,71 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                                              "the final syllable - the file simply "
                                              "stopped. This is the room to breathe "
                                              "at the very edges.")
+                    spara_pause = gr.Slider(
+                        0, 2000, 320, step=20,
+                        label="At a SHORT paragraph / dialogue line (ms)",
+                        info="These scripts put every spoken line in its own "
+                             "paragraph. At the full 800ms a rapid exchange read "
+                             "as unrelated statements; 320ms reads as a breath.")
                     gr.Markdown(
                         "Punctuation is passed through untouched, so it still does "
                         "its work: `.` short pause · `,` tiny · `...` dramatic · "
                         "`—` beat · `!` energy · `?` rising tone."
                     )
+
+                with gr.Accordion("Prosody chaining", open=False):
+                    gr.Markdown(
+                        "F5-TTS generates a **continuation** of whatever audio it "
+                        "is conditioned on. Feeding it the same reference clip for "
+                        "every chunk restarts the intonation 200 times a story - "
+                        "which is what made narration sound like separate "
+                        "recordings. Chaining conditions each chunk on the previous "
+                        "one instead.\n\n"
+                        "*Anchored*: your real clip is concatenated **before** the "
+                        "previous chunk rather than replaced by it, so genuine "
+                        "human audio stays in the window. Measured voice distance - "
+                        "no chaining `0.0116`, pure chaining `0.0123`, "
+                        "anchored **`0.0115`**."
+                    )
+                    chain = gr.Checkbox(True, label="Chain prosody across chunks")
+                    chain_across_para = gr.Checkbox(
+                        True, label="Keep chaining across paragraph breaks",
+                        info="A narrator pauses at a paragraph; they do not reset "
+                             "their voice. Re-anchoring here dropped chaining to "
+                             "45-70% depending on how the author formatted "
+                             "paragraphs, and tracked perceived quality exactly.")
+                    chain_reanchor = gr.Slider(
+                        1, 20, 8, step=1, label="Re-anchor every N chunks",
+                        info="Return to the real reference clip this often. Lower "
+                             "is safer for timbre, higher is smoother.")
+                    drift_limit = gr.Slider(
+                        0.0, 0.15, 0.045, step=0.005,
+                        label="Re-anchor if voice drifts past",
+                        info="0 disables. Unchained generation reaches 0.041 "
+                             "naturally, so below that it fires constantly.")
+
+                with gr.Accordion("Post-processing", open=False):
+                    gr.Markdown(
+                        "Vocos decodes accurate speech that is also dry and thin. "
+                        "This is a gentle mastering chain: +2.5 dB low shelf at "
+                        "200 Hz, a 2nd-order roll-off from 11 kHz, and 2:1 "
+                        "compression. The unprocessed mix is **always** kept "
+                        "alongside as `<name>_raw.wav`, so it is reversible and an "
+                        "A/B never needs a re-render."
+                    )
+                    apply_warmth = gr.Checkbox(
+                        True, label="Warmth, de-harsh and compression")
+
+                with gr.Accordion("Reproducibility", open=False):
+                    seed_num = gr.Number(
+                        7, label="Seed", precision=0,
+                        info="Fixed so a run repeats and a bad chunk can be "
+                             "re-rendered deliberately. F5-TTS otherwise draws a "
+                             "fresh random seed per chunk.")
+                    lock_seed = gr.Checkbox(
+                        True, label="Same seed for every chunk",
+                        info="Off uses seed+i. The probes locked it and came out "
+                             "consistently cleaner.")
                 gr.Markdown(
                     "**Speed levers**: lower NFE, bigger chunks, and a *shorter* "
                     "reference clip (every chunk re-synthesises the reference, so a "
@@ -1688,7 +1794,9 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
               use_dict, dict_rows, auto_translit, device_choice,
               line_pause, para_pause, title, cfg, trim, drop_dir,
               expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs, lead_ms, tail_ms, flow_pause],
+              max_secs, lead_ms, tail_ms, flow_pause,
+              spara_pause, chain, chain_across_para, chain_reanchor,
+              drift_limit, apply_warmth, seed_num, lock_seed],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -1699,7 +1807,9 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                  use_dict, dict_rows, auto_translit, device_choice,
                  line_pause, para_pause, cfg, trim, drop_dir,
                  expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
-              max_secs, lead_ms, tail_ms, flow_pause],
+              max_secs, lead_ms, tail_ms, flow_pause,
+                 spara_pause, chain, chain_across_para, chain_reanchor,
+                 drift_limit, apply_warmth, seed_num, lock_seed],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)
