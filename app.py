@@ -1466,20 +1466,128 @@ def autotranscribe(upload_path):
 
 
 # ------------------------------------------------------------------- UI ----
+STUDIO_THEME = gr.themes.Base(
+    primary_hue=gr.themes.colors.amber,
+    secondary_hue=gr.themes.colors.orange,
+    neutral_hue=gr.themes.colors.slate,
+    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "ui-monospace", "monospace"],
+).set(
+    body_background_fill="#0b0d10",
+    background_fill_primary="#13171d",
+    background_fill_secondary="#0f1318",
+    block_background_fill="#13171d",
+    block_border_width="1px",
+    block_border_color="#232a33",
+    block_radius="14px",
+    block_label_background_fill="transparent",
+    block_label_text_color="#8b97a8",
+    block_title_text_color="#c8d2e0",
+    body_text_color="#dfe6ef",
+    body_text_color_subdued="#8b97a8",
+    input_background_fill="#0d1116",
+    input_border_color="#242b35",
+    input_radius="10px",
+    button_large_radius="10px",
+    button_small_radius="8px",
+    button_primary_background_fill="linear-gradient(180deg,#f0a52b,#d98613)",
+    button_primary_background_fill_hover="linear-gradient(180deg,#ffb63c,#e8951c)",
+    button_primary_text_color="#1a1204",
+    button_secondary_background_fill="#1b212a",
+    button_secondary_background_fill_hover="#232b36",
+    button_secondary_text_color="#dfe6ef",
+    slider_color="#f0a52b",
+)
+
+STUDIO_CSS = """
+.gradio-container{max-width:1500px!important;padding-top:0!important}
+footer{display:none!important}
+
+#studio-head{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:14px 20px;margin:0 0 14px;border:1px solid #232a33;border-radius:14px;
+  background:linear-gradient(135deg,#151a21 0%,#11151a 60%,#171208 100%)}
+#studio-head .brand{display:flex;align-items:baseline;gap:10px}
+#studio-head .brand b{font-size:19px;letter-spacing:-.02em;color:#f3f6fa}
+#studio-head .brand span{font-size:12px;color:#7d8898}
+#studio-head .pills{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+  font-weight:600;letter-spacing:.02em;padding:5px 11px;border-radius:999px;
+  border:1px solid #2a323d;background:#161b22;color:#9fadbf;white-space:nowrap}
+.pill.on{border-color:#3c2f12;background:#20180a;color:#f0a52b}
+.pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+.tabs>.tab-nav{gap:2px;border-bottom:1px solid #232a33!important;padding-bottom:0}
+.tabs>.tab-nav>button{border:0!important;background:transparent!important;
+  color:#7d8898!important;font-weight:600;font-size:13.5px;padding:10px 16px!important;
+  border-radius:9px 9px 0 0!important}
+.tabs>.tab-nav>button.selected{color:#f0a52b!important;background:#13171d!important;
+  box-shadow:inset 0 -2px 0 #f0a52b}
+
+.block{box-shadow:none!important}
+span[data-testid="block-info"]{color:#6f7b8c!important;font-size:11.5px!important;
+  line-height:1.5!important}
+label>span{font-size:12.5px!important;font-weight:600!important;letter-spacing:.01em}
+
+.gradio-accordion{border:1px solid #232a33!important;border-radius:12px!important;
+  background:#10141a!important;overflow:hidden}
+.gradio-accordion>button,.gradio-accordion .label-wrap{font-weight:650!important;
+  font-size:13px!important;color:#c8d2e0!important;letter-spacing:.01em}
+
+#script-box textarea{font-size:15.5px!important;line-height:1.75!important;
+  background:#0a0e12!important;border-color:#242b35!important}
+#script-box textarea::placeholder{color:#4c5665}
+
+#status-box textarea,#est-box textarea,#qlog textarea{
+  font-family:var(--font-mono)!important;font-size:12px!important;
+  line-height:1.6!important;color:#a8b6c8!important;background:#0a0e12!important}
+
+#go-btn{font-weight:700!important;font-size:14.5px!important;letter-spacing:.01em;
+  box-shadow:0 6px 18px -8px rgba(240,165,43,.6)!important}
+
+table tbody td{font-size:12.5px!important;color:#c2cdda!important}
+table thead th{font-size:11.5px!important;text-transform:uppercase;
+  letter-spacing:.06em;color:#7d8898!important}
+"""
+
+
+def _pill(text, on=False):
+    return f'<span class="pill{" on" if on else ""}"><i class="dot"></i>{text}</span>'
+
+
+# Gradio 6 moved theme/css from the Blocks constructor to launch().
 with gr.Blocks(title="Marathi Story Voice") as demo:
-    gr.Markdown(f"## 🎙️ Marathi Story Voice\nRunning on **{device_label()}** · float32")
+    gr.HTML(
+        '<div id="studio-head">'
+        '<div class="brand"><b>🎙️ Marathi Story Voice</b>'
+        '<span>भयकथा narration studio</span></div>'
+        '<div class="pills">'
+        + _pill(device_label(), True)
+        + _pill("float32")
+        + _pill(f"{len(list_ckpts())} models")
+        + _pill(f"{len(list_refs())} reference clips")
+        + _pill("chaining + warmth", True)
+        + "</div></div>")
 
     with gr.Tab("Generate"):
         with gr.Row():
             with gr.Column(scale=3):
-                script = gr.Textbox(label="Script (Marathi)", lines=18,
+                script = gr.Textbox(label="Script (Marathi)", lines=20,
+                                    elem_id="script-box",
                                     placeholder="इथे तुमची भयकथा पेस्ट करा…")
                 with gr.Row():
-                    go = gr.Button("Generate audio", variant="primary", scale=2)
+                    go = gr.Button("Generate audio", variant="primary", scale=2,
+                                   elem_id="go-btn")
                     est_btn = gr.Button("Estimate time", scale=1)
-                est = gr.Textbox(label="Estimate", lines=2, interactive=False)
-                audio_out = gr.Audio(label="Result", type="filepath")
-                status = gr.Textbox(label="Status", lines=4, interactive=False)
+                est = gr.Textbox(label="Estimate", lines=2, interactive=False,
+                                 elem_id="est-box")
+                audio_out = gr.Audio(
+                    label="Result", type="filepath",
+                    waveform_options=gr.WaveformOptions(
+                        waveform_color="#3d4757",
+                        waveform_progress_color="#f0a52b",
+                        show_recording_waveform=True))
+                status = gr.Textbox(label="Status", lines=6, interactive=False,
+                                    elem_id="status-box")
 
             with gr.Column(scale=2):
                 ckpt = gr.Dropdown(list_ckpts(), label="Checkpoint",
@@ -1707,7 +1815,8 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
             q_run = gr.Button("▶ Run entire queue", variant="primary")
             q_refresh = gr.Button("↻ Refresh")
             q_clear = gr.Button("🗑 Clear pending")
-        q_log = gr.Textbox(label="Queue log", lines=14, interactive=False)
+        q_log = gr.Textbox(label="Queue log", lines=16, interactive=False,
+                           elem_id="qlog")
 
     with gr.Tab("Reference clips"):
         gr.Markdown(
@@ -1829,6 +1938,7 @@ if __name__ == "__main__":
     print(f"device: {device_label()}")
     print(f"models: {MODELS_DIR}\nrefs  : {REF_DIR}\nout   : {OUT_DIR}")
     demo.queue().launch(
+        theme=STUDIO_THEME, css=STUDIO_CSS,
         server_name="127.0.0.1", server_port=7860, inbrowser=True,
         # gradio refuses paths outside cwd/temp unless explicitly allowed
         allowed_paths=[str(OUT_DIR), str(REF_DIR), str(MODELS_DIR)],
