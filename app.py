@@ -30,22 +30,46 @@ import numpy as np
 import soundfile as sf
 import torch
 
+# These live beside app.py. A bare `import pacing` resolves against sys.path,
+# which is the CALLER's - so loading app.py by path from tools/ put only
+# tools/ on it and every one of these silently became None. The symptoms were
+# not obviously import-related: pacing=None disables duration budgeting, so
+# the audio just sounds rushed; numerals=None reads digits as digits; and
+# warmth=None skips post-processing. Every A/B rendered through tools/ was
+# affected, which invalidated both the paragraph comparison and the merge
+# sweep before anyone noticed. run_queue.py sits in this directory so real
+# renders were never hit - which is exactly why it went unseen for so long.
+# Not BASE - that is defined below and honours MTTS_HOME, whereas these
+# modules always sit beside this file.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+_MISSING = []
 try:
     import translit                      # English -> Devanagari (CMU based)
-except Exception:
+except Exception as _e:
     translit = None
+    _MISSING.append(f"translit ({_e})")
 try:
     import numerals                      # digits -> Marathi words
-except Exception:
+except Exception as _e:
     numerals = None
+    _MISSING.append(f"numerals ({_e})")
 try:
     import pacing                        # how long should this text take to say
-except Exception:
+except Exception as _e:
     pacing = None
+    _MISSING.append(f"pacing ({_e})")
 try:
     import warmth                        # post-vocoder EQ + compression
-except Exception:
+except Exception as _e:
     warmth = None
+    _MISSING.append(f"warmth ({_e})")
+if _MISSING:
+    print("*** app.py could not import its own modules: " + ", ".join(_MISSING) +
+          "\n*** Output will be degraded (rushed pacing / unspoken digits).",
+          file=sys.stderr, flush=True)
 
 # ---------------------------------------------------------------- paths ----
 BASE = Path(os.environ.get("MTTS_HOME", Path(__file__).resolve().parent))
@@ -861,6 +885,23 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
 
     # Budget each chunk's duration ourselves. See pacing.py for why F5-TTS's
     # own byte-count estimate rushes some lines and drawls others.
+    def _planning_failed(why):
+        """Never let a fallback to the byte-count estimate be silent.
+
+        Falling back reinstates the original pacing bug: the model races, and
+        the only symptom is that the audio sounds rushed. Callers that suppress
+        `log` - every A/B harness in tools/ did - would otherwise get hurried
+        audio with no indication why. Both sides of the paragraph A/B rendered
+        with planned_s=0 and were judged rushed, which silently invalidated the
+        comparison. So this goes to stderr regardless of the log callback.
+        """
+        import traceback
+        print(f"\n*** DURATION PLANNING FAILED: {why}\n"
+              f"*** Falling back to F5-TTS's byte-count estimate.\n"
+              f"*** THE OUTPUT WILL SOUND RUSHED - do not judge quality from it.\n"
+              f"{traceback.format_exc() if sys.exc_info()[0] else ''}",
+              file=sys.stderr, flush=True)
+
     ref_norm, ref_sec, plan, rate = ref_txt.strip(), 0.0, None, 0.0
     if fit_duration:
         try:
@@ -877,8 +918,13 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                                      speed=speed, pace=pace, log=log)
             if planned:
                 plan, rate = planned
+            else:
+                _planning_failed("plan_durations returned nothing")
         except Exception as e:
+            _planning_failed(repr(e))
             log(f"  duration planning unavailable ({e}); using F5-TTS's estimate")
+    if fit_duration and not plan:
+        _planning_failed("no per-chunk budget was produced")
 
     # put the abbreviation periods back before anything is spoken or indexed -
     # unconditionally, so a failure above cannot leak the marker into the model
