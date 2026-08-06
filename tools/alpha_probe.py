@@ -23,10 +23,26 @@ Marathi - your ear is the instrument here.
 
 Output: out/_alpha_<name>.wav  - play them in order.
 """
+import argparse
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
+
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--device", default="auto",
+                 help="'cpu' runs this without touching the GPU, so it can go "
+                      "in parallel with a story render")
+_ap.add_argument("--threads", type=int, default=0,
+                 help="cap torch threads. This box is 4c/8t and a GPU render "
+                      "still needs CPU between chunks for reference "
+                      "preprocessing - saturating it would slow that down")
+_ap.add_argument("--nfe", type=int, default=32)
+_A = _ap.parse_args()
+if _A.threads:
+    os.environ["OMP_NUM_THREADS"] = str(_A.threads)
+    os.environ["MKL_NUM_THREADS"] = str(_A.threads)
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -35,9 +51,21 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE))
 spec = importlib.util.spec_from_file_location("mtts_app", HERE / "app.py")
 app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
+
+if _A.threads:
+    import torch
+    torch.set_num_threads(_A.threads)
+for _m, _n in ((app.pacing, "pacing"), (app.numerals, "numerals")):
+    if _m is None:
+        sys.exit(f"app.py could not import {_n} - refusing to run a comparison "
+                 f"that would be silently unpaced, which is exactly how the "
+                 f"first attempt at this sweep was wasted.")
+DEVICE = app.DEVICE if _A.device == "auto" else _A.device
+print(f"device: {DEVICE}   threads: {_A.threads or 'default'}   nfe: {_A.nfe}")
 
 # Two real sentences from your scripts, picked for च/ज density (8 each).
 TEXT = ("तिचा आवाज, तिच्या बांगड्यांचा आवाज, तिच्या चप्पलांचा आवाज.\n"
@@ -71,8 +99,8 @@ for name, fname in CANDIDATES:
     t0 = time.time()
     try:
         out, dur, took, n, _ = app.synthesize(
-            TEXT, ckpt, ref, ref_txt, 1.0, 32, 400, pauses,
-            True, [[k, v] for k, v in d.items()], True, app.DEVICE,
+            TEXT, ckpt, ref, ref_txt, 1.0, _A.nfe, 400, pauses,
+            True, [[k, v] for k, v in d.items()], True, DEVICE,
             out_name=f"_alpha_{name}",
             on_progress=lambda f, m: None, log=lambda m: None,
             cfg=2.0, pace=1.35, seed=7, seed_per_chunk=False,
