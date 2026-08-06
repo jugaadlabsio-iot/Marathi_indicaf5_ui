@@ -651,6 +651,15 @@ remains is that chaining is bounded: it re-anchors every few chunks and at every
 paragraph, so a contour still cannot span a whole page. Long-range structure is
 beyond what a 22-second conditioning window can hold.
 
+**The paragraph fix is confirmed by ear.** Rendered on 28_The_Munjya's
+grandmother/grandson exchange - the densest dialogue run in the corpus, and
+the passage that produced the "one word at a time" complaint - the new
+behaviour (320ms, chain carried across the break) was picked over the old
+(800ms + re-anchor) in a blind-ish A/B where both sides were verified to have
+duration budgets applied. The first attempt at this A/B was invalid: both
+sides rendered unpaced because app.py had silently lost `pacing`, and both
+were judged rushed.
+
 **Anchored chaining is validated at short length, not long.** The three-way
 measurement (0.0116 / 0.0123 / 0.0115) was on a 6-chunk passage where the gap
 between chained and unchained was only 0.0007. A 213-chunk story is where a
