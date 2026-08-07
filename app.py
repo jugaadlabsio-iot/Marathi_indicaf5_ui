@@ -26,6 +26,7 @@ import platform
 from pathlib import Path
 
 import gradio as gr
+import math
 import numpy as np
 import soundfile as sf
 import torch
@@ -353,6 +354,81 @@ def starts_mid_word(wav, sr, window_ms=40.0, thresh_db=-25.0):
         return False
     head = float(np.sqrt((wav[:n] ** 2).mean()))
     return 20 * np.log10(max(head, 1e-9) / peak) > thresh_db
+
+
+TAIL_CONTEXT = "हं."            # neutral filler, rendered then cut away
+TAIL_CTX_MAX_CHARS = 40        # only worth it for short lines
+
+
+def cut_at_first_gap(wav, sr, thresh_db=-45.0, min_gap_ms=90.0, keep_ms=140.0):
+    """Return the audio up to the first real pause, plus a little silence.
+
+    Used to rescue a one-word chunk: the word is re-rendered with a filler word
+    after it, so the model articulates and releases it properly instead of
+    stopping dead, and then everything from the pause onward is discarded.
+    Returns None if no pause is found - better to keep the original take than
+    to guess a cut point.
+    """
+    x = np.asarray(wav, dtype=np.float32)
+    if x.ndim > 1:
+        x = x.mean(1)
+    win = int(sr * 0.01)
+    if x.size < win * 8:
+        return None
+    n = x.size // win
+    db = 20.0 * np.log10(np.maximum(
+        np.sqrt((x[:n * win].reshape(n, win) ** 2).mean(1)), 1e-9))
+    quiet = db < thresh_db
+    need = max(1, int(min_gap_ms / 10.0))
+    run = None
+    for i, q in enumerate(quiet):
+        if q and run is None:
+            run = i
+        elif not q and run is not None:
+            if i - run >= need and run > need:      # ignore leading silence
+                end = int((run * 0.01 + keep_ms / 1000.0) * sr)
+                return x[:min(end, x.size)]
+            run = None
+    return None
+
+
+MIN_END_FALL_DB = 12.0
+
+
+def end_fall_db(wav, sr, window_ms=30.0):
+    """How far the last 30ms sits below this chunk's own peak.
+
+    An absolute dBFS threshold cannot separate these: a quiet chunk that ends
+    cleanly and a loud one cut mid-vowel can sit at the same level. Measured
+    over a 154-chunk story the peak-relative figure is strongly bimodal -
+    median 92dB for chunks that end in real silence, against 21-31dB for seven
+    that stop dead, with a clean gap up to the next value at 68dB. So 40dB
+    separates them with room to spare.
+
+    The old absolute test (-25 dBFS over 40ms) caught only 2 of those 7, which
+    is why the retry below almost never fired and clipping kept being reported
+    after it was supposedly fixed.
+    """
+    x = np.asarray(wav, dtype=np.float32)
+    if x.ndim > 1:
+        x = x.mean(1)
+    n = int(sr * window_ms / 1000.0)
+    # Degenerate audio scores WORST, never best. Returning a large "clean"
+    # number here made a near-empty render win every comparison in the retry
+    # loop below: it was unmeasurable, so it looked perfect, and a chunk that
+    # had merely ended at 24dB was replaced by one that ended at 2dB.
+    if x.size < n * 2:
+        return 0.0
+    peak = float(np.max(np.abs(x)))
+    if peak <= 1e-6:
+        return 0.0
+    tail = float(np.sqrt(np.mean(x[-n:] ** 2)))
+    return 20.0 * math.log10(peak / max(tail, 1e-9))
+
+
+def ends_abruptly(wav, sr, min_fall=MIN_END_FALL_DB):
+    """True if the chunk stops while still sounding, i.e. clipped."""
+    return end_fall_db(wav, sr) < min_fall
 
 
 def ends_mid_word(wav, sr, window_ms=40.0, thresh_db=-25.0):
@@ -880,7 +956,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                cfg=2.0, sway=-1.0, trim=True, drop_directions=True,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
-               seed=None, retry_short=True, max_secs=3.2,
+               seed=None, retry_short=True, edge_retries=3, max_secs=3.2,
                lead_ms=350, tail_ms=900, seed_per_chunk=True,
                chain=True, chain_reanchor=8, drift_limit=0.045,
                chain_across_paragraphs=True,
@@ -1031,6 +1107,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             ref_fp = None
     drifted = 0
     chained_n = 0            # durable evidence chaining actually engaged
+    abrupt_left = []         # chunks still clipped after every retry
 
     def reference_for(idx, kind_prev):
         """(path, text, seconds) to condition this chunk on."""
@@ -1143,25 +1220,74 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
             raise RuntimeError(f"Chunk {i} produced NaN (float16 failure mode); "
                                f"switch device to cpu.")
 
-        # Still at full voice at either edge = cut off mid-word. Give it more
-        # room and render again; measured at 5% of chunks before this.
+        # Cut off mid-word at either edge. Retry, and KEEP THE BEST candidate
+        # rather than the first one that scrapes past a threshold.
+        #
+        # The previous version only ever offered the model more time. That is
+        # the wrong lever: chunks that stop dead are typically using well under
+        # half the duration they already have (0.39 and 0.46 fill on the two
+        # worst), so more room changes nothing. What does move it is the seed -
+        # the same text was clean 4/10 versus 9/10 across seeds in the earlier
+        # probes. So try more time once, then walk seeds, and score every
+        # candidate by end-fall instead of accepting the first non-failure.
         clipped_head = starts_mid_word(wav, sr)
-        if want is not None and retry_short and (ends_mid_word(wav, sr) or clipped_head):
+        if want is not None and retry_short and (ends_abruptly(wav, sr) or clipped_head):
             where = "started" if clipped_head else "ended"
-            log(f"  chunk {i}: {where} mid-word, re-rendering with more time")
-            try:
-                kw3 = dict(kw)
-                # `want` already carries the roominess; stacking another 30%
-                # on top of a high pace setting lands in the babble zone, so
-                # the extra is small and the total stays under the ceiling
-                kw3["fix_duration"] = cur_ref_sec + want * 1.12
-                w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
-                w3 = np.asarray(w3, dtype=np.float32)
-                if (not np.isnan(w3).any() and not ends_mid_word(w3, sr)
-                        and not starts_mid_word(w3, sr)):
-                    wav = w3
-            except Exception as e:
-                log(f"  chunk {i}: re-render failed ({e}), keeping the first take")
+            best_wav, best_fall = wav, end_fall_db(wav, sr)
+            base_seed = int(kw.get("seed") or (seed if seed is not None else 0))
+            plans = [("more time", 1.12)] + [
+                (f"seed+{1000 * k}", None) for k in range(1, int(edge_retries) + 1)]
+            tried = 0
+            for k, (label, extra) in enumerate(plans):
+                if best_fall >= MIN_END_FALL_DB:
+                    break                        # good enough, stop burning GPU
+                try:
+                    kw3 = dict(kw)
+                    if extra is not None:
+                        kw3["fix_duration"] = cur_ref_sec + want * extra
+                    else:
+                        kw3["seed"] = base_seed + 1000 * k
+                    w3, sr, _ = tts.infer(gen_text=chunk, **kw3)
+                    w3 = np.asarray(w3, dtype=np.float32)
+                    tried += 1
+                    if np.isnan(w3).any() or starts_mid_word(w3, sr):
+                        continue
+                    if w3.size < wav.size * 0.6:
+                        continue      # collapsed render, not an improvement
+                    f3 = end_fall_db(w3, sr)
+                    if f3 > best_fall:
+                        best_wav, best_fall = w3, f3
+                except Exception as e:
+                    log(f"  chunk {i}: retry '{label}' failed ({e})")
+
+            # Seeds cannot rescue a SHORT chunk. Measured: "का?" came back at
+            # 24dB originally and 24dB after four seeds - every seed ends the
+            # vowel and stops, because a one-word line has nothing after it to
+            # decay into. So give the model something, then cut it off at the
+            # pause it leaves behind.
+            if best_fall < MIN_END_FALL_DB and len(chunk) <= TAIL_CTX_MAX_CHARS:
+                try:
+                    kw4 = dict(kw)
+                    kw4.pop("fix_duration", None)     # the text is longer now
+                    w4, sr, _ = tts.infer(gen_text=chunk + " " + TAIL_CONTEXT, **kw4)
+                    w4 = np.asarray(w4, dtype=np.float32)
+                    if not np.isnan(w4).any():
+                        cut = cut_at_first_gap(w4, sr)
+                        if cut is not None and cut.size > sr // 10:
+                            f4 = end_fall_db(cut, sr)
+                            if f4 > best_fall:
+                                best_wav, best_fall = cut, f4
+                                log(f"  chunk {i}: rescued with trailing "
+                                    f"context -> {f4:.0f}dB")
+                except Exception as e:
+                    log(f"  chunk {i}: trailing-context rescue failed ({e})")
+
+            wav = best_wav
+            ok = best_fall >= MIN_END_FALL_DB
+            log(f"  chunk {i}: {where} mid-word, {tried} retries -> "
+                f"{best_fall:.0f}dB end-fall ({'fixed' if ok else 'STILL ABRUPT'})")
+            if not ok:
+                abrupt_left.append(i)
 
         if trim:
             wav = trim_silence(wav, sr)
