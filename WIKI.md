@@ -651,6 +651,33 @@ remains is that chaining is bounded: it re-anchors every few chunks and at every
 paragraph, so a contour still cannot span a whole page. Long-range structure is
 beyond what a 22-second conditioning window can hold.
 
+**The merge ratio also controls च/ज - in the OPPOSITE direction to the
+hypothesis.** The theory was that dental च/ज [ts]/[dz] would be *lost* to the
+merge, because Hindi has only the palatal pair and IndicF5's base is
+Hindi-dominant, so a higher alpha (more of your voice) should have been
+better. Swept against a च/ज-dense sentence, alpha 0.50 and 0.55 render
+चप्पलांचा correctly and **0.60 and above break it**. More fine-tune is worse,
+not better - the same catastrophic forgetting that broke थांबलं and कोल्हापूर
+reaches च too. The Hindi explanation was wrong; the mechanism is § 9 all over
+again.
+
+Practical outcome: `model_voice_merged50.pt` was already correct and needs no
+change, and 0.55 is available if more voice character is ever wanted. It also
+means the च/ज errors still being reported are NOT systematic dental/palatal
+loss - they are word-level and need the dictionary, not a re-merge.
+
+**The reference clip is chosen by ear, and by name.** Of three full renders of
+01_hunted_well differing only in reference: ref_nat1 (cut from the 48kHz
+master) was best, ref_short second, ref_nat3 "robotic". Notably ref_nat1 is
+the *slower* of the two cut clips - which reconciles with the rejected
+time-stretch experiment: the problem there was phase-vocoder damage to the
+voice, not the slower tempo.
+
+`run_queue.py` used to pick the reference by `min(duration)` as a proxy for
+"fastest to synthesise". That is a landmine when clips are added: ref_nat3 at
+4.46s silently outranked the 4.80s clip chosen by ear. The default is now
+named in `ref/DEFAULT.txt`.
+
 **The paragraph fix is confirmed by ear.** Rendered on 28_The_Munjya's
 grandmother/grandson exchange - the densest dialogue run in the corpus, and
 the passage that produced the "one word at a time" complaint - the new

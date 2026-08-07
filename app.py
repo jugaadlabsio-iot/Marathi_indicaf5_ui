@@ -111,6 +111,28 @@ def list_refs():
                   if (p.with_suffix(".txt")).exists() or True)
 
 
+def default_ref():
+    """The reference clip to use unless told otherwise.
+
+    Picked by name from ref/DEFAULT.txt, NOT by duration. Choosing the
+    shortest clip was a landmine: it is a proxy for "fastest to synthesise",
+    but the reference sets the voice and the tempo of every chunk, and a
+    newly-added 4.46s clip silently outranked the 4.80s one that had actually
+    been chosen by ear.
+    """
+    refs = list_refs()
+    if not refs:
+        return None
+    marker = REF_DIR / "DEFAULT.txt"
+    if marker.exists():
+        want = marker.read_text(encoding="utf-8").strip()
+        for r in refs:
+            if Path(r).name == want:
+                return r
+    import soundfile as _sf
+    return min(refs, key=lambda r: _sf.info(r).duration)
+
+
 def ref_text_for(path):
     if not path:
         return ""
@@ -1593,9 +1615,9 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                 ckpt = gr.Dropdown(list_ckpts(), label="Checkpoint",
                                    value=(list_ckpts() or [None])[0])
                 ref_wav = gr.Dropdown(list_refs(), label="Reference clip",
-                                      value=(list_refs() or [None])[0])
+                                      value=default_ref())
                 ref_txt = gr.Textbox(label="Reference transcript (must match exactly)",
-                                     lines=3, value=ref_text_for((list_refs() or [""])[0]))
+                                     lines=3, value=ref_text_for(default_ref() or ""))
                 refresh = gr.Button("↻ Refresh lists", size="sm")
                 title = gr.Textbox(label="Title (used for the output filename)",
                                    placeholder="munjya")

@@ -118,11 +118,8 @@ ckpt = a.ckpt or next((c for c in ckpts if "voice_merged" in c.lower()),
 refs = app.list_refs()
 if not refs:
     sys.exit(f"No reference clips in {app.REF_DIR}")
-if a.ref:
-    ref = a.ref
-else:                                  # shortest clip = fastest generation
-    import soundfile as sf
-    ref = min(refs, key=lambda r: sf.info(r).duration)
+# Named in ref/DEFAULT.txt, not chosen by length - see app.default_ref().
+ref = a.ref or app.default_ref()
 ref_txt = app.ref_text_for(ref)
 if not ref_txt:
     sys.exit(f"No transcript beside {ref} - create a matching .txt")
