@@ -90,6 +90,10 @@ p.add_argument("--break-chain-at-paragraphs", action="store_true",
                     "line. That made chaining engage on only 44-70%% of "
                     "chunks depending on how the author formatted "
                     "paragraphs, and tracked perceived choppiness exactly")
+p.add_argument("--room-wet", type=float, default=0.08,
+               help="room ambience mix. 0 disables. Early reflections "
+                    "only, 55ms - Vocos decodes with no space of its "
+                    "own. 0.08 picked by ear against 0.0 and 0.15")
 p.add_argument("--no-warmth", action="store_true",
                help="skip the post-vocoder EQ and compression. On by default; "
                     "the unprocessed mix is always kept as <name>_raw.wav")
@@ -233,7 +237,7 @@ for i, name in enumerate(jobs, 1):
             seed_per_chunk=not a.lock_seed,
             chain=not a.no_chain, chain_reanchor=a.chain_reanchor,
             chain_across_paragraphs=not a.break_chain_at_paragraphs,
-            apply_warmth=not a.no_warmth)
+            apply_warmth=not a.no_warmth, room_wet=a.room_wet)
         import shutil
         shutil.move(str(src), str(app.QUEUE_DONE / name))
         ok += 1

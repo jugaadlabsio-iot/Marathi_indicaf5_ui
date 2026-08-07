@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.signal import butter, fftconvolve, filtfilt
 import soundfile as sf
 from scipy import signal
 
@@ -91,13 +92,58 @@ def compress(x, sr, thresh_db=-20.0, ratio=2.0, attack_ms=8.0,
     return out
 
 
-def process(x, sr, warmth_db=2.5, cutoff=11000.0, ratio=2.0, peak=0.95):
+
+def room(x, sr, wet=0.08, size_ms=55.0, damp_hz=4500.0, seed=7):
+    """A microscopic room, added to speech that was decoded in a vacuum.
+
+    Vocos reconstructs from a mel spectrogram and adds no space of its own, so
+    what comes back carries only whatever room the reference clip had. Against
+    a real recording it reads as slightly "in your head" rather than in a
+    place.
+
+    Deliberately tiny: early reflections only, no tail. A 55ms impulse is
+    shorter than a syllable, so it thickens the voice without smearing
+    consonants or sounding like a hall. Anything longer starts eating the
+    retroflexes this project spent weeks getting right.
+
+    0.08 chosen by ear against 0.0 and 0.15 on a real passage. The reference
+    clip already carries some room of its own, so this is topping up a space
+    that half exists rather than creating one - which is why the useful range
+    is this narrow and why 0.15 was already too much.
+    """
+    if wet <= 0:
+        return x
+    rng = np.random.default_rng(seed)
+    n = max(8, int(sr * size_ms / 1000.0))
+    t = np.arange(n) / sr
+    # a handful of decaying early reflections, not a dense tail
+    ir = np.zeros(n, dtype=np.float64)
+    for tap_ms, g in ((7.0, 0.55), (13.0, -0.38), (23.0, 0.27),
+                      (31.0, -0.19), (43.0, 0.12)):
+        i = int(sr * tap_ms / 1000.0)
+        if i < n:
+            ir[i] += g
+    ir += rng.normal(0, 0.03, n) * np.exp(-t * 60.0)     # a little diffusion
+    ir *= np.exp(-t * 45.0)
+    # damp the reflections so they do not add sibilance back
+    b, a_ = butter(2, min(damp_hz / (sr / 2.0), 0.99), btype="low")
+    ir = filtfilt(b, a_, ir)
+    ir /= max(np.sum(np.abs(ir)), 1e-9)
+
+    wetsig = fftconvolve(x, ir, mode="full")[:x.size]
+    return (1.0 - wet) * x + wet * wetsig
+
+
+def process(x, sr, warmth_db=2.5, cutoff=11000.0, ratio=2.0, peak=0.95,
+            room_wet=0.08):
     if x.ndim > 1:
         x = x.mean(axis=1)
     x = x.astype(np.float64)
     x = low_shelf(x, sr, gain_db=warmth_db)
     x = de_harsh(x, sr, cutoff=cutoff)
     x = compress(x, sr, ratio=ratio)
+    if room_wet > 0:
+        x = room(x, sr, wet=room_wet)
     m = float(np.max(np.abs(x)))
     if m > 0:
         x = x / m * peak

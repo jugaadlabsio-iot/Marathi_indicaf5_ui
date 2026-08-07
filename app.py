@@ -392,6 +392,70 @@ def cut_at_first_gap(wav, sr, thresh_db=-45.0, min_gap_ms=90.0, keep_ms=140.0):
     return None
 
 
+MAX_INTERNAL_GAP_MS = 350.0
+
+
+def compress_internal_gaps(wav, sr, max_ms=MAX_INTERNAL_GAP_MS,
+                           thresh_db=-40.0, fade_ms=8.0):
+    """Shorten over-long silences INSIDE a chunk. Speech is never touched.
+
+    Duration budgeting hands the model more time than the text needs -
+    roominess 1.35 by default, because a starved chunk rushes whichever word
+    is hardest. The model does not spend that surplus by speaking slower. It
+    speaks at the reference's rate and pads with silence, placed wherever it
+    likes, including immediately after the first word of a sentence.
+
+    Measured on a finished story: 120 of 154 chunks carried an internal pause
+    of 400ms or more, 167 seconds of dead air in a 12-minute file - 23% of the
+    runtime - with a worst single gap of 2.96 SECONDS. Reported as words being
+    "cut off", which is exactly what a hole after the first word sounds like.
+
+    Capping rather than removing: a pause at a comma is real phrasing and
+    worth keeping, it just should not run to three seconds. Leading and
+    trailing silence are left alone - trim_silence() owns those, and the gaps
+    between chunks are inserted deliberately.
+    """
+    x = np.asarray(wav, dtype=np.float32)
+    if x.ndim > 1:
+        x = x.mean(1)
+    step = max(1, int(sr * 0.02))
+    n = x.size // step
+    if n < 4:
+        return x
+    frames = x[:n * step].reshape(n, step)
+    db = 20.0 * np.log10(np.maximum(np.sqrt((frames ** 2).mean(1)), 1e-9))
+    voiced = np.where(db > thresh_db)[0]
+    if voiced.size < 2:
+        return x
+    lo, hi = int(voiced[0]), int(voiced[-1])
+    keep_frames = max(1, int(max_ms / 20.0))
+
+    pieces, cur, run = [], 0, None
+    for i in range(lo, hi + 1):
+        if db[i] <= thresh_db:
+            if run is None:
+                run = i
+        else:
+            if run is not None and i - run > keep_frames:
+                pieces.append(x[cur * step:(run + keep_frames) * step])
+                cur = i
+            run = None
+    pieces.append(x[cur * step:])
+    if len(pieces) == 1:
+        return x
+
+    f = max(1, int(sr * fade_ms / 1000.0))
+    out = pieces[0]
+    for nxt in pieces[1:]:
+        if out.size >= f and nxt.size >= f:      # crossfade so a splice cannot click
+            head = nxt[:f] * np.linspace(0, 1, f, dtype=np.float32)
+            tail = out[-f:] * np.linspace(1, 0, f, dtype=np.float32)
+            out = np.concatenate([out[:-f], tail + head, nxt[f:]])
+        else:
+            out = np.concatenate([out, nxt])
+    return out.astype(np.float32)
+
+
 MIN_END_FALL_DB = 12.0
 
 
@@ -957,6 +1021,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
                expand_nums=True, one_pass=True,
                pace=1.0, fit_duration=True, per_sentence=True,
                seed=None, retry_short=True, edge_retries=3, max_secs=3.2,
+               max_internal_gap_ms=MAX_INTERNAL_GAP_MS, room_wet=0.08,
                lead_ms=350, tail_ms=900, seed_per_chunk=True,
                chain=True, chain_reanchor=8, drift_limit=0.045,
                chain_across_paragraphs=True,
@@ -1291,6 +1356,8 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
 
         if trim:
             wav = trim_silence(wav, sr)
+        if max_internal_gap_ms and max_internal_gap_ms > 0:
+            wav = compress_internal_gaps(wav, sr, float(max_internal_gap_ms))
 
         # If the model used far less time than the text needs, it very likely
         # skipped something - this is the "whole word missing" failure. One
@@ -1375,7 +1442,7 @@ def synthesize(script, ckpt, ref_wav, ref_txt, speed, nfe, max_chars,
         # is always one file away.
         try:
             sf.write(OUT_DIR / f"{base}_raw.wav", audio, sr)
-            audio = warmth.process(audio, sr)
+            audio = warmth.process(audio, sr, room_wet=float(room_wet))
             log("  warmth applied (raw kept as _raw.wav)")
         except Exception as e:
             log(f"  warmth skipped ({e})")
@@ -1427,7 +1494,7 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
              max_secs, lead_ms, tail_ms, flow_pause,
              spara_pause=320, chain=True, chain_across_para=True,
              chain_reanchor=8, drift_limit=0.045, apply_warmth=True,
-             seed_num=7, lock_seed=True,
+             seed_num=7, lock_seed=True, room_wet=0.08,
              progress=gr.Progress()):
     if not (script or "").strip():
         return None, "Type or paste some Marathi text first."
@@ -1456,7 +1523,8 @@ def generate(script, ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             seed_per_chunk=not lock_seed,
             chain=chain, chain_reanchor=int(chain_reanchor),
             chain_across_paragraphs=chain_across_para,
-            drift_limit=float(drift_limit), apply_warmth=apply_warmth)
+            drift_limit=float(drift_limit), apply_warmth=apply_warmth,
+            room_wet=float(room_wet))
     except Exception as e:
         return None, f"Failed: {e}"
 
@@ -1513,7 +1581,7 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
               lead_ms=350, tail_ms=900, flow_pause=60,
               spara_pause=320, chain=True, chain_across_para=True,
               chain_reanchor=8, drift_limit=0.045, apply_warmth=True,
-              seed_num=7, lock_seed=True,
+              seed_num=7, lock_seed=True, room_wet=0.08,
               progress=gr.Progress()):
     """Process every queued story. Designed to be left running overnight:
     one bad story never stops the rest, and finished work is never redone."""
@@ -1552,7 +1620,8 @@ def run_queue(ckpt, ref_wav, ref_txt, speed, nfe, pause_ms, max_chars,
             seed_per_chunk=not lock_seed,
             chain=chain, chain_reanchor=int(chain_reanchor),
             chain_across_paragraphs=chain_across_para,
-            drift_limit=float(drift_limit), apply_warmth=apply_warmth)
+            drift_limit=float(drift_limit), apply_warmth=apply_warmth,
+            room_wet=float(room_wet))
             shutil.move(str(src), str(QUEUE_DONE / name))
             log_lines.append(f"   OK  {dur/60:.1f} min audio, {n} chunks, "
                              f"{took/60:.1f} min -> {out_path.name}")
@@ -1917,6 +1986,15 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                     )
                     apply_warmth = gr.Checkbox(
                         True, label="Warmth, de-harsh and compression")
+                    room_wet = gr.Slider(
+                        0.0, 0.30, 0.08, step=0.01,
+                        label="Room ambience (wet)",
+                        info="Vocos decodes with no space of its own, so the "
+                             "voice can sit 'in your head' rather than in a "
+                             "place. Early reflections only, 55ms, no tail - "
+                             "shorter than a syllable so it cannot smear the "
+                             "retroflexes. 0.08 picked by ear; 0.15 was too "
+                             "much because the reference already carries room.")
 
                 with gr.Accordion("Reproducibility", open=False):
                     seed_num = gr.Number(
@@ -2053,7 +2131,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
               expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
               max_secs, lead_ms, tail_ms, flow_pause,
               spara_pause, chain, chain_across_para, chain_reanchor,
-              drift_limit, apply_warmth, seed_num, lock_seed],
+              drift_limit, apply_warmth, seed_num, lock_seed, room_wet],
              [audio_out, status])
 
     q_add.click(add_to_queue, [q_title, script], [q_table, q_log])
@@ -2066,7 +2144,7 @@ with gr.Blocks(title="Marathi Story Voice") as demo:
                  expand_nums, one_pass, sent_pause, pace, fit_dur, per_sent,
               max_secs, lead_ms, tail_ms, flow_pause,
                  spara_pause, chain, chain_across_para, chain_reanchor,
-                 drift_limit, apply_warmth, seed_num, lock_seed],
+                 drift_limit, apply_warmth, seed_num, lock_seed, room_wet],
                 [q_table, q_log])
 
     auto_btn.click(autotranscribe, up, new_txt)
