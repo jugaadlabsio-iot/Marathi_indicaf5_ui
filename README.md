@@ -36,6 +36,10 @@ Built for a specific job: producing long-form Marathi horror-story narration (�
 
 ---
 
+> **[STORY_PROMPT.md](STORY_PROMPT.md) — writing scripts this reads well.**
+> The formatting rules a story has to follow, with the measured
+> threshold behind each one. Paste it into any LLM before writing.
+
 > **[WIKI.md](WIKI.md) — the engineering log.** Every problem hit while
 > building this, what it actually turned out to be, and the numbers that
 > proved it. Read §9 first if pronunciation is wrong.
